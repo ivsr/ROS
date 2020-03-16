@@ -5,7 +5,7 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import rosbag
 
-
+# python bag2image.py --bag (PATH-TO-YOUR-BAG) --output_path (IMAGE-OUTPUT-FOLDER) --image_topic /gi/simulation/left/image_raw
 # extract images froma  rosbag
 # input params: --bag bag_name
 # 		--output_path place_where_you_want_to_save_images
