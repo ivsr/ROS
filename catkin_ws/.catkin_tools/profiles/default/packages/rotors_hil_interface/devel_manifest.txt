@@ -1,7 +1,0 @@
-rotors_simulator/rotors_hil_interface
-/home/ivsr/ROS/catkin_ws/devel/.private/rotors_hil_interface/cmake.lock /home/ivsr/ROS/catkin_ws/devel/./cmake.lock
-/home/ivsr/ROS/catkin_ws/devel/.private/rotors_hil_interface/share/rotors_hil_interface/cmake/rotors_hil_interfaceConfig-version.cmake /home/ivsr/ROS/catkin_ws/devel/share/rotors_hil_interface/cmake/rotors_hil_interfaceConfig-version.cmake
-/home/ivsr/ROS/catkin_ws/devel/.private/rotors_hil_interface/share/rotors_hil_interface/cmake/rotors_hil_interfaceConfig.cmake /home/ivsr/ROS/catkin_ws/devel/share/rotors_hil_interface/cmake/rotors_hil_interfaceConfig.cmake
-/home/ivsr/ROS/catkin_ws/devel/.private/rotors_hil_interface/lib/librotors_hil_interface.so /home/ivsr/ROS/catkin_ws/devel/lib/librotors_hil_interface.so
-/home/ivsr/ROS/catkin_ws/devel/.private/rotors_hil_interface/lib/rotors_hil_interface/rotors_hil_interface_node /home/ivsr/ROS/catkin_ws/devel/lib/rotors_hil_interface/rotors_hil_interface_node
-/home/ivsr/ROS/catkin_ws/devel/.private/rotors_hil_interface/lib/pkgconfig/rotors_hil_interface.pc /home/ivsr/ROS/catkin_ws/devel/lib/pkgconfig/rotors_hil_interface.pc

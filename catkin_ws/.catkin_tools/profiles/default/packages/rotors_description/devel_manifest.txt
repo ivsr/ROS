@@ -1,5 +1,0 @@
-rotors_simulator/rotors_description
-/home/ivsr/ROS/catkin_ws/devel/.private/rotors_description/cmake.lock /home/ivsr/ROS/catkin_ws/devel/./cmake.lock
-/home/ivsr/ROS/catkin_ws/devel/.private/rotors_description/share/rotors_description/cmake/rotors_descriptionConfig-version.cmake /home/ivsr/ROS/catkin_ws/devel/share/rotors_description/cmake/rotors_descriptionConfig-version.cmake
-/home/ivsr/ROS/catkin_ws/devel/.private/rotors_description/share/rotors_description/cmake/rotors_descriptionConfig.cmake /home/ivsr/ROS/catkin_ws/devel/share/rotors_description/cmake/rotors_descriptionConfig.cmake
-/home/ivsr/ROS/catkin_ws/devel/.private/rotors_description/lib/pkgconfig/rotors_description.pc /home/ivsr/ROS/catkin_ws/devel/lib/pkgconfig/rotors_description.pc

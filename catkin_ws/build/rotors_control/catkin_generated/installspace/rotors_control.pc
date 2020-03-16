@@ -1,8 +1,0 @@
-prefix=/home/ivsr/ROS/catkin_ws/install
-
-Name: rotors_control
-Description: Description of rotors_control
-Version: 2.2.3
-Cflags: -I/home/ivsr/ROS/catkin_ws/install/include
-Libs: -L/home/ivsr/ROS/catkin_ws/install/lib -llee_position_controller -lroll_pitch_yawrate_thrust_controller
-Requires: geometry_msgs mav_msgs nav_msgs roscpp sensor_msgs

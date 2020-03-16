@@ -1,8 +1,0 @@
-prefix=/home/ivsr/ROS/catkin_ws/devel/.private/rqt_rotors
-
-Name: rqt_rotors
-Description: Description of rqt_rotors
-Version: 2.2.3
-Cflags: 
-Libs: -L/home/ivsr/ROS/catkin_ws/devel/.private/rqt_rotors/lib 
-Requires: mavros_msgs rospy rqt_gui rqt_gui_py

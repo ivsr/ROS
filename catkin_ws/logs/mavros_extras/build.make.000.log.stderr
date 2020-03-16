@@ -1,9 +1,0 @@
-[01m[K/home/ivsr/ROS/catkin_ws/src/mavros/mavros_extras/src/plugins/odom.cpp:[m[K In member function ‘[01m[Kvoid mavros::extra_plugins::OdometryPlugin::odom_cb(const ConstPtr&)[m[K’:
-[01m[K/home/ivsr/ROS/catkin_ws/src/mavros/mavros_extras/src/plugins/odom.cpp:234:51:[m[K [01;31m[Kerror: [m[K‘[01m[Kstruct mavlink::common::msg::ODOMETRY[m[K’ has no member named ‘[01m[Ktwist_covariance[m[K’; did you mean ‘[01m[Kpose_covariance[m[K’?
-   ftf::covariance_urt_to_mavlink(cov_vel_map, msg.[01;31m[Ktwist_covariance[m[K);
-                                                   [01;31m[K^~~~~~~~~~~~~~~~[m[K
-                                                   [32m[Kpose_covariance[m[K
-make[2]: *** [CMakeFiles/mavros_extras.dir/src/plugins/odom.cpp.o] Error 1
-make[2]: *** Waiting for unfinished jobs....
-make[1]: *** [CMakeFiles/mavros_extras.dir/all] Error 2
-make: *** [all] Error 2

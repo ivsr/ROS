@@ -1,8 +1,0 @@
-prefix=/home/ivsr/ROS/catkin_ws/install
-
-Name: rotors_hil_interface
-Description: Description of rotors_hil_interface
-Version: 2.2.3
-Cflags: -I/home/ivsr/ROS/catkin_ws/install/include
-Libs: -L/home/ivsr/ROS/catkin_ws/install/lib -lrotors_hil_interface
-Requires: geometry_msgs mav_msgs mavros mavros_msgs roscpp sensor_msgs
