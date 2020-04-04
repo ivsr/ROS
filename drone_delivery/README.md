@@ -4,10 +4,10 @@
 - This dir contains .laucnh, .world and model files
 - Need to copy into corresponding dir inside the local src dir: launch, worlds and models
 
-- .launch file
+- .launch file: <path/to/px4>/Firmware/launch
 
-- .world file
+- .world file: <path/to/px4>/Firmware/Tools/sitl_gazebo/worlds
 
-- model.sdf
+- model.sdf: <path/to/px4>/Firmware/Tools/sitl_gazebo/models/<model_name>
 
-- model.config
+- model.config: <path/to/px4>/Firmware/Tools/sitl_gazebo/models/<model_name>
