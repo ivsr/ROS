@@ -44,9 +44,9 @@
  */
 
 #include <fcntl.h>
-#include <px4_platform_common/px4_config.h>
-#include <px4_platform_common/defines.h>
-#include <px4_platform_common/tasks.h>
+#include <px4_config.h>
+#include <px4_defines.h>
+#include <px4_tasks.h>
 #include <poll.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -166,6 +166,8 @@ send_data(int uart, uint8_t *buffer, size_t size)
 int
 hott_telemetry_thread_main(int argc, char *argv[])
 {
+	warnx("starting");
+
 	connect_count = perf_alloc(PC_COUNT,	"reconnects       ");
 	recon_port = perf_alloc(PC_COUNT,		"reopen port      ");
 	reqs_count = perf_alloc(PC_COUNT,		"requests        ");

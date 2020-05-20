@@ -1,4 +1,3 @@
-uint64 timestamp		# time since system start (microseconds)
 uint8 SAT_INFO_MAX_SATELLITES = 20
 
 uint8 count			# Number of satellites in satellite info

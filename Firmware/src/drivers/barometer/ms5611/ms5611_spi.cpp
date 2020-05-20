@@ -37,7 +37,22 @@
  * SPI interface for MS5611
  */
 
+/* XXX trim includes */
+#include <px4_config.h>
+
+#include <sys/types.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <assert.h>
+#include <errno.h>
+#include <unistd.h>
+
+#include <arch/board/board.h>
+
+#include <drivers/device/spi.h>
+
 #include "ms5611.h"
+#include "board_config.h"
 
 /* SPI protocol address bits */
 #define DIR_READ			(1<<7)
@@ -52,7 +67,7 @@ class MS5611_SPI : public device::SPI
 {
 public:
 	MS5611_SPI(uint8_t bus, uint32_t device, ms5611::prom_u &prom_buf);
-	virtual ~MS5611_SPI() = default;
+	virtual ~MS5611_SPI();
 
 	virtual int	init();
 	virtual int	read(unsigned offset, void *data, unsigned count);
@@ -121,13 +136,24 @@ MS5611_SPI::MS5611_SPI(uint8_t bus, uint32_t device, ms5611::prom_u &prom_buf) :
 {
 }
 
+MS5611_SPI::~MS5611_SPI()
+{
+}
+
 int
 MS5611_SPI::init()
 {
-	int ret = SPI::init();
+	int ret;
+
+#if defined(PX4_SPI_BUS_RAMTRON) && \
+	(PX4_SPI_BUS_BARO == PX4_SPI_BUS_RAMTRON)
+	SPI::set_lockmode(LOCK_THREADS);
+#endif
+
+	ret = SPI::init();
 
 	if (ret != OK) {
-		PX4_DEBUG("SPI init failed");
+		DEVICE_DEBUG("SPI init failed");
 		goto out;
 	}
 
@@ -135,7 +161,7 @@ MS5611_SPI::init()
 	ret = _reset();
 
 	if (ret != OK) {
-		PX4_DEBUG("reset failed");
+		DEVICE_DEBUG("reset failed");
 		goto out;
 	}
 
@@ -143,7 +169,7 @@ MS5611_SPI::init()
 	ret = _read_prom();
 
 	if (ret != OK) {
-		PX4_DEBUG("prom readout failed");
+		DEVICE_DEBUG("prom readout failed");
 		goto out;
 	}
 
@@ -226,7 +252,7 @@ MS5611_SPI::_read_prom()
 	 * Wait for PROM contents to be in the device (2.8 ms) in the case we are
 	 * called immediately after reset.
 	 */
-	px4_usleep(3000);
+	usleep(3000);
 
 	/* read and convert PROM words */
 	bool all_zero = true;
@@ -239,18 +265,18 @@ MS5611_SPI::_read_prom()
 			all_zero = false;
 		}
 
-		//PX4_DEBUG("prom[%u]=0x%x", (unsigned)i, (unsigned)_prom.c[i]);
+		//DEVICE_DEBUG("prom[%u]=0x%x", (unsigned)i, (unsigned)_prom.c[i]);
 	}
 
 	/* calculate CRC and return success/failure accordingly */
 	int ret = ms5611::crc4(&_prom.c[0]) ? OK : -EIO;
 
 	if (ret != OK) {
-		PX4_DEBUG("crc failed");
+		DEVICE_DEBUG("crc failed");
 	}
 
 	if (all_zero) {
-		PX4_DEBUG("prom all zero");
+		DEVICE_DEBUG("prom all zero");
 		ret = -EIO;
 	}
 

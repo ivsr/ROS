@@ -33,10 +33,12 @@
 px4_add_module(
 	MODULE drivers__bmi055
 	MAIN bmi055
+	STACK_MAIN 1200
 	COMPILE_FLAGS
-		-Wno-cast-align # TODO: fix and enable
-	SRCS
-		BMI055_accel.cpp
-		BMI055_gyro.cpp
+	SRCS		
+		bmi055_accel.cpp
+		bmi055_gyro.cpp
 		bmi055_main.cpp
+	DEPENDS
 	)
+

@@ -33,15 +33,9 @@
 
 add_library(flashparams
 	flashfs.c
-	flashparams.cpp
+	flashparams.c
 )
-
 add_dependencies(flashparams prebuild_targets)
 target_compile_definitions(flashparams PRIVATE -DMODULE_NAME="flashparams")
-target_compile_options(flashparams
-	PRIVATE
-		-Wno-sign-compare # TODO: fix this
-		-Wno-cast-align # TODO: fix and enable
-)
-
+target_compile_options(flashparams PRIVATE -Wno-sign-compare) # TODO: fix this
 target_link_libraries(flashparams PRIVATE nuttx_arch)

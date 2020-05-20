@@ -41,9 +41,9 @@
  * @author Nils Rottann <Nils.Rottmann@tuhh.de>
  */
 
-#include <px4_platform_common/px4_config.h>
-#include <px4_platform_common/tasks.h>
-#include <px4_platform_common/posix.h>
+#include <px4_config.h>
+#include <px4_tasks.h>
+#include <px4_posix.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <poll.h>
@@ -88,11 +88,10 @@ int uuv_example_app_main(int argc, char *argv[])
 	orb_advert_t act_pub = orb_advertise(ORB_ID(actuator_controls_0), &act);
 
 	/* one could wait for multiple topics with this technique, just using one here */
-	px4_pollfd_struct_t fds[2] = {};
-	fds[0].fd = sensor_sub_fd;
-	fds[0].events = POLLIN;
-	fds[1].fd = vehicle_attitude_sub_fd;
-	fds[1].events = POLLIN;
+	px4_pollfd_struct_t fds[] = {
+		{ .fd = sensor_sub_fd,   .events = POLLIN },
+		{ .fd = vehicle_attitude_sub_fd,   .events = POLLIN },
+	};
 
 	int error_counter = 0;
 

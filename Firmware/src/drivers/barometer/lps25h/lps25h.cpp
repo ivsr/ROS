@@ -37,6 +37,42 @@
  * Driver for the LPS25H barometer connected via I2C or SPI.
  */
 
+#include <px4_config.h>
+
+#include <drivers/device/i2c.h>
+
+#include <sys/types.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <semaphore.h>
+#include <string.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <errno.h>
+#include <stdio.h>
+#include <math.h>
+#include <unistd.h>
+
+#include <nuttx/arch.h>
+#include <nuttx/wqueue.h>
+#include <nuttx/clock.h>
+
+#include <board_config.h>
+
+#include <perf/perf_counter.h>
+#include <systemlib/err.h>
+
+#include <drivers/drv_baro.h>
+#include <drivers/drv_hrt.h>
+#include <drivers/device/ringbuffer.h>
+#include <drivers/drv_device.h>
+
+#include <uORB/uORB.h>
+
+#include <float.h>
+#include <getopt.h>
+
 #include "lps25h.h"
 
 /*
@@ -151,7 +187,11 @@ enum LPS25H_BUS {
 	LPS25H_BUS_SPI
 };
 
-class LPS25H : public cdev::CDev, public px4::ScheduledWorkItem
+#ifndef CONFIG_SCHED_WORKQUEUE
+# error This requires CONFIG_SCHED_WORKQUEUE.
+#endif
+
+class LPS25H : public device::CDev
 {
 public:
 	LPS25H(device::Device *interface, const char *path);
@@ -168,22 +208,23 @@ public:
 	void			print_info();
 
 protected:
-	device::Device			*_interface;
+	Device			*_interface;
 
 private:
-	unsigned		_measure_interval{0};
+	work_s			_work;
+	unsigned		_measure_ticks;
 
-	ringbuffer::RingBuffer	*_reports{nullptr};
-	bool			_collect_phase{false};
+	ringbuffer::RingBuffer	*_reports;
+	bool			_collect_phase;
 
-	orb_advert_t		_baro_topic{nullptr};
-	int			_orb_class_instance{-1};
-	int			_class_instance{-1};
+	orb_advert_t		_baro_topic;
+	int			_orb_class_instance;
+	int			_class_instance;
 
 	perf_counter_t		_sample_perf;
 	perf_counter_t		_comms_errors;
 
-	sensor_baro_s	_last_report{};           /**< used for info() */
+	struct baro_report	_last_report;           /**< used for info() */
 
 	/**
 	 * Initialise the automatic measurement state machine and start it.
@@ -216,7 +257,15 @@ private:
 	 * and measurement to provide the most recent measurement possible
 	 * at the next interval.
 	 */
-	void			Run() override;
+	void			cycle();
+
+	/**
+	 * Static trampoline from the workq context; because we don't have a
+	 * generic workq wrapper yet.
+	 *
+	 * @param arg		Instance pointer for the driver that is polling.
+	 */
+	static void		cycle_trampoline(void *arg);
 
 	/**
 	 * Write a register.
@@ -260,13 +309,30 @@ extern "C" __EXPORT int lps25h_main(int argc, char *argv[]);
 
 
 LPS25H::LPS25H(device::Device *interface, const char *path) :
-	CDev(path),
-	ScheduledWorkItem(MODULE_NAME, px4::device_bus_to_wq(interface->get_device_id())),
+	CDev("LPS25H", path),
 	_interface(interface),
+	_work{},
+	_measure_ticks(0),
+	_reports(nullptr),
+	_collect_phase(false),
+	_baro_topic(nullptr),
+	_orb_class_instance(-1),
+	_class_instance(-1),
 	_sample_perf(perf_alloc(PC_ELAPSED, "lps25h_read")),
-	_comms_errors(perf_alloc(PC_COUNT, "lps25h_comms_errors"))
+	_comms_errors(perf_alloc(PC_COUNT, "lps25h_comms_errors")),
+	_last_report{0}
 {
-	_interface->set_device_type(DRV_BARO_DEVTYPE_LPS25H);
+	// set the device type from the interface
+	_device_id.devid_s.bus_type = _interface->get_device_bus_type();
+	_device_id.devid_s.bus = _interface->get_device_bus();
+	_device_id.devid_s.address = _interface->get_device_address();
+	_device_id.devid_s.devtype = DRV_BARO_DEVTYPE_LPS25H;
+
+	// enable debug() calls
+	_debug_enabled = false;
+
+	// work_cancel in the dtor will explode if we don't do this...
+	memset(&_work, 0, sizeof(_work));
 }
 
 LPS25H::~LPS25H()
@@ -297,7 +363,7 @@ LPS25H::init()
 	ret = CDev::init();
 
 	if (ret != OK) {
-		PX4_DEBUG("CDev init failed");
+		DEVICE_DEBUG("CDev init failed");
 		goto out;
 	}
 
@@ -305,7 +371,7 @@ LPS25H::init()
 	_reports = new ringbuffer::RingBuffer(2, sizeof(sensor_baro_s));
 
 	if (_reports == nullptr) {
-		PX4_DEBUG("can't get memory for reports");
+		DEVICE_DEBUG("can't get memory for reports");
 		ret = -ENOMEM;
 		goto out;
 	}
@@ -326,8 +392,8 @@ out:
 ssize_t
 LPS25H::read(struct file *filp, char *buffer, size_t buflen)
 {
-	unsigned count = buflen / sizeof(sensor_baro_s);
-	sensor_baro_s *brp = reinterpret_cast<sensor_baro_s *>(buffer);
+	unsigned count = buflen / sizeof(struct baro_report);
+	struct baro_report *brp = reinterpret_cast<struct baro_report *>(buffer);
 	int ret = 0;
 
 	/* buffer must be large enough */
@@ -336,7 +402,7 @@ LPS25H::read(struct file *filp, char *buffer, size_t buflen)
 	}
 
 	/* if automatic measurement is enabled */
-	if (_measure_interval > 0) {
+	if (_measure_ticks > 0) {
 
 		/*
 		 * While there is space in the caller's buffer, and reports, copy them.
@@ -375,7 +441,7 @@ LPS25H::read(struct file *filp, char *buffer, size_t buflen)
 		}
 
 		if (_reports->get(brp)) {
-			ret = sizeof(sensor_baro_s);
+			ret = sizeof(struct baro_report);
 		}
 	} while (0);
 
@@ -391,17 +457,27 @@ LPS25H::ioctl(struct file *filp, int cmd, unsigned long arg)
 	case SENSORIOCSPOLLRATE: {
 			switch (arg) {
 
+			/* switching to manual polling */
+			case SENSOR_POLLRATE_MANUAL:
+				stop();
+				_measure_ticks = 0;
+				return OK;
+
+			/* external signalling (DRDY) not supported */
+			case SENSOR_POLLRATE_EXTERNAL:
+
 			/* zero would be bad */
 			case 0:
 				return -EINVAL;
 
-			/* set default polling rate */
+			/* set default/max polling rate */
+			case SENSOR_POLLRATE_MAX:
 			case SENSOR_POLLRATE_DEFAULT: {
 					/* do we need to start internal polling? */
-					bool want_start = (_measure_interval == 0);
+					bool want_start = (_measure_ticks == 0);
 
 					/* set interval for next measurement to minimum legal value */
-					_measure_interval = (LPS25H_CONVERSION_INTERVAL);
+					_measure_ticks = USEC2TICK(LPS25H_CONVERSION_INTERVAL);
 
 					/* if we need to start the poll state machine, do it */
 					if (want_start) {
@@ -414,18 +490,18 @@ LPS25H::ioctl(struct file *filp, int cmd, unsigned long arg)
 			/* adjust to a legal polling interval in Hz */
 			default: {
 					/* do we need to start internal polling? */
-					bool want_start = (_measure_interval == 0);
+					bool want_start = (_measure_ticks == 0);
 
 					/* convert hz to tick interval via microseconds */
-					unsigned interval = (1000000 / arg);
+					unsigned ticks = USEC2TICK(1000000 / arg);
 
 					/* check against maximum rate */
-					if (interval < (LPS25H_CONVERSION_INTERVAL)) {
+					if (ticks < USEC2TICK(LPS25H_CONVERSION_INTERVAL)) {
 						return -EINVAL;
 					}
 
 					/* update interval for next measurement */
-					_measure_interval = interval;
+					_measure_ticks = ticks;
 
 					/* if we need to start the poll state machine, do it */
 					if (want_start) {
@@ -435,6 +511,30 @@ LPS25H::ioctl(struct file *filp, int cmd, unsigned long arg)
 					return OK;
 				}
 			}
+		}
+
+	case SENSORIOCGPOLLRATE:
+		if (_measure_ticks == 0) {
+			return SENSOR_POLLRATE_MANUAL;
+		}
+
+		return (1000 / _measure_ticks);
+
+	case SENSORIOCSQUEUEDEPTH: {
+			/* lower bound is mandatory, upper bound is a sanity check */
+			if ((arg < 1) || (arg > 100)) {
+				return -EINVAL;
+			}
+
+			irqstate_t flags = px4_enter_critical_section();
+
+			if (!_reports->resize(arg)) {
+				px4_leave_critical_section(flags);
+				return -ENOMEM;
+			}
+
+			px4_leave_critical_section(flags);
+			return OK;
 		}
 
 	case SENSORIOCRESET:
@@ -457,13 +557,13 @@ LPS25H::start()
 	_reports->flush();
 
 	/* schedule a cycle to start things */
-	ScheduleNow();
+	work_queue(HPWORK, &_work, (worker_t)&LPS25H::cycle_trampoline, this, 1);
 }
 
 void
 LPS25H::stop()
 {
-	ScheduleClear();
+	work_cancel(HPWORK, &_work);
 }
 
 int
@@ -490,14 +590,22 @@ LPS25H::reset()
 }
 
 void
-LPS25H::Run()
+LPS25H::cycle_trampoline(void *arg)
+{
+	LPS25H *dev = reinterpret_cast<LPS25H *>(arg);
+
+	dev->cycle();
+}
+
+void
+LPS25H::cycle()
 {
 	/* collection phase? */
 	if (_collect_phase) {
 
 		/* perform collection */
 		if (OK != collect()) {
-			PX4_DEBUG("collection error");
+			DEVICE_DEBUG("collection error");
 			/* restart the measurement state machine */
 			start();
 			return;
@@ -509,10 +617,14 @@ LPS25H::Run()
 		/*
 		 * Is there a collect->measure gap?
 		 */
-		if (_measure_interval > (LPS25H_CONVERSION_INTERVAL)) {
+		if (_measure_ticks > USEC2TICK(LPS25H_CONVERSION_INTERVAL)) {
 
 			/* schedule a fresh cycle call when we are ready to measure again */
-			ScheduleDelayed(_measure_interval - LPS25H_CONVERSION_INTERVAL);
+			work_queue(HPWORK,
+				   &_work,
+				   (worker_t)&LPS25H::cycle_trampoline,
+				   this,
+				   _measure_ticks - USEC2TICK(LPS25H_CONVERSION_INTERVAL));
 
 			return;
 		}
@@ -520,14 +632,18 @@ LPS25H::Run()
 
 	/* measurement phase */
 	if (OK != measure()) {
-		PX4_DEBUG("measure error");
+		DEVICE_DEBUG("measure error");
 	}
 
 	/* next phase is collection */
 	_collect_phase = true;
 
 	/* schedule a fresh cycle call when the measurement is done */
-	ScheduleDelayed(LPS25H_CONVERSION_INTERVAL);
+	work_queue(HPWORK,
+		   &_work,
+		   (worker_t)&LPS25H::cycle_trampoline,
+		   this,
+		   USEC2TICK(LPS25H_CONVERSION_INTERVAL));
 }
 
 int
@@ -561,7 +677,7 @@ LPS25H::collect()
 	int	ret;
 
 	perf_begin(_sample_perf);
-	sensor_baro_s new_report;
+	struct baro_report new_report;
 	bool sensor_is_onboard = false;
 
 	/* this should be fairly close to the end of the measurement, so the best approximation of the time */
@@ -596,18 +712,21 @@ LPS25H::collect()
 	new_report.pressure = p;
 
 	/* get device ID */
-	new_report.device_id = _interface->get_device_id();
+	new_report.device_id = _device_id.devid;
 
-	if (_baro_topic != nullptr) {
-		/* publish it */
-		orb_publish(ORB_ID(sensor_baro), _baro_topic, &new_report);
+	if (!(_pub_blocked)) {
 
-	} else {
-		_baro_topic = orb_advertise_multi(ORB_ID(sensor_baro), &new_report,
-						  &_orb_class_instance, (sensor_is_onboard) ? ORB_PRIO_HIGH : ORB_PRIO_MAX);
+		if (_baro_topic != nullptr) {
+			/* publish it */
+			orb_publish(ORB_ID(sensor_baro), _baro_topic, &new_report);
 
-		if (_baro_topic == nullptr) {
-			PX4_DEBUG("ADVERT FAIL");
+		} else {
+			_baro_topic = orb_advertise_multi(ORB_ID(sensor_baro), &new_report,
+							  &_orb_class_instance, (sensor_is_onboard) ? ORB_PRIO_HIGH : ORB_PRIO_MAX);
+
+			if (_baro_topic == nullptr) {
+				DEVICE_DEBUG("ADVERT FAIL");
+			}
 		}
 	}
 
@@ -647,7 +766,7 @@ LPS25H::print_info()
 {
 	perf_print_counter(_sample_perf);
 	perf_print_counter(_comms_errors);
-	printf("poll interval:  %u \n", _measure_interval);
+	printf("poll interval:  %u ticks\n", _measure_ticks);
 	print_message(_last_report);
 
 	_reports->print_info("report queue");
@@ -792,7 +911,7 @@ void
 test(enum LPS25H_BUS busid)
 {
 	struct lps25h_bus_option &bus = find_bus(busid);
-	sensor_baro_s report;
+	struct baro_report report;
 	ssize_t sz;
 	int ret;
 
@@ -812,6 +931,16 @@ test(enum LPS25H_BUS busid)
 	}
 
 	print_message(report);
+
+	/* set the queue depth to 10 */
+	if (OK != ioctl(fd, SENSORIOCSQUEUEDEPTH, 10)) {
+		errx(1, "failed to set queue depth");
+	}
+
+	/* start the sensor polling at 2Hz */
+	if (OK != ioctl(fd, SENSORIOCSPOLLRATE, 2)) {
+		errx(1, "failed to set 2Hz poll rate");
+	}
 
 	/* read the sensor 5x and report each value */
 	for (unsigned i = 0; i < 5; i++) {
@@ -901,12 +1030,9 @@ int
 lps25h_main(int argc, char *argv[])
 {
 	enum LPS25H_BUS busid = LPS25H_BUS_ALL;
-
-	int myoptind = 1;
 	int ch;
-	const char *myoptarg = nullptr;
 
-	while ((ch = px4_getopt(argc, argv, "XIS:", &myoptind, &myoptarg)) != EOF) {
+	while ((ch = getopt(argc, argv, "XIS:")) != EOF) {
 		switch (ch) {
 #if (PX4_I2C_BUS_ONBOARD || PX4_SPIDEV_HMC)
 
@@ -929,12 +1055,7 @@ lps25h_main(int argc, char *argv[])
 		}
 	}
 
-	if (myoptind >= argc) {
-		lps25h::usage();
-		exit(0);
-	}
-
-	const char *verb = argv[myoptind];
+	const char *verb = argv[optind];
 
 	/*
 	 * Start/load the driver.

@@ -33,6 +33,7 @@
 px4_add_module(
 	MODULE examples__rover_steering_control
 	MAIN rover_steering_control
+	STACK_MAIN 1200
 	STACK_MAX 1300
 	SRCS
 		main.cpp

@@ -63,15 +63,16 @@ PrecLand::PrecLand(Navigator *navigator) :
 	MissionBlock(navigator),
 	ModuleParams(navigator)
 {
-	_handle_param_acceleration_hor = param_find("MPC_ACC_HOR");
-	_handle_param_xy_vel_cruise = param_find("MPC_XY_CRUISE");
-
-	updateParams();
 }
 
 void
 PrecLand::on_activation()
 {
+	// We need to subscribe here and not in the constructor because constructor is called before the navigator task is spawned
+	if (_target_pose_sub < 0) {
+		_target_pose_sub = orb_subscribe(ORB_ID(landing_target_pose));
+	}
+
 	_state = PrecLandState::Start;
 	_search_cnt = 0;
 	_last_slewrate_time = 0;
@@ -93,7 +94,6 @@ PrecLand::on_activation()
 		pos_sp_triplet->current.lon = _navigator->get_global_position()->lon;
 		pos_sp_triplet->current.alt = _navigator->get_global_position()->alt;
 		pos_sp_triplet->current.valid = true;
-		pos_sp_triplet->current.timestamp = hrt_absolute_time();
 	}
 
 	_sp_pev = matrix::Vector2f(0, 0);
@@ -101,19 +101,21 @@ PrecLand::on_activation()
 	_last_slewrate_time = 0;
 
 	switch_to_state_start();
+
 }
 
 void
 PrecLand::on_active()
 {
 	// get new target measurement
-	_target_pose_updated = _target_pose_sub.update(&_target_pose);
+	orb_check(_target_pose_sub, &_target_pose_updated);
 
 	if (_target_pose_updated) {
+		orb_copy(ORB_ID(landing_target_pose), _target_pose_sub, &_target_pose);
 		_target_pose_valid = true;
 	}
 
-	if ((hrt_elapsed_time(&_target_pose.timestamp) / 1e6f) > _param_pld_btout.get()) {
+	if ((hrt_elapsed_time(&_target_pose.timestamp) / 1e6f) > _param_timeout.get()) {
 		_target_pose_valid = false;
 	}
 
@@ -159,20 +161,6 @@ PrecLand::on_active()
 }
 
 void
-PrecLand::updateParams()
-{
-	ModuleParams::updateParams();
-
-	if (_handle_param_acceleration_hor != PARAM_INVALID) {
-		param_get(_handle_param_acceleration_hor, &_param_acceleration_hor);
-	}
-
-	if (_handle_param_xy_vel_cruise != PARAM_INVALID) {
-		param_get(_handle_param_xy_vel_cruise, &_param_xy_vel_cruise);
-	}
-}
-
-void
 PrecLand::run_state_start()
 {
 	// check if target visible and go to horizontal approach
@@ -198,7 +186,7 @@ PrecLand::run_state_start()
 		}
 
 		// if we don't see the target after 1 second, search for it
-		if (_param_pld_srch_tout.get() > 0) {
+		if (_param_search_timeout.get() > 0) {
 
 			if (hrt_absolute_time() - _point_reached_time > 2000000) {
 				if (!switch_to_state_search()) {
@@ -348,7 +336,7 @@ PrecLand::run_state_search()
 	}
 
 	// check if search timed out and go to fallback
-	if (hrt_absolute_time() - _state_start_time > _param_pld_srch_tout.get()*SEC2USEC) {
+	if (hrt_absolute_time() - _state_start_time > _param_search_timeout.get()*SEC2USEC) {
 		PX4_WARN("Search timed out");
 
 		if (!switch_to_state_fallback()) {
@@ -429,7 +417,7 @@ PrecLand::switch_to_state_search()
 	vehicle_local_position_s *vehicle_local_position = _navigator->get_local_position();
 
 	position_setpoint_triplet_s *pos_sp_triplet = _navigator->get_position_setpoint_triplet();
-	pos_sp_triplet->current.alt = vehicle_local_position->ref_alt + _param_pld_srch_alt.get();
+	pos_sp_triplet->current.alt = vehicle_local_position->ref_alt + _param_search_alt.get();
 	pos_sp_triplet->current.type = position_setpoint_s::SETPOINT_TYPE_POSITION;
 	_navigator->set_position_setpoint_triplet_updated();
 
@@ -470,14 +458,14 @@ bool PrecLand::check_state_conditions(PrecLandState state)
 
 	switch (state) {
 	case PrecLandState::Start:
-		return _search_cnt <= _param_pld_max_srch.get();
+		return _search_cnt <= _param_max_searches.get();
 
 	case PrecLandState::HorizontalApproach:
 
 		// if we're already in this state, only want to make it invalid if we reached the target but can't see it anymore
 		if (_state == PrecLandState::HorizontalApproach) {
-			if (fabsf(_target_pose.x_abs - vehicle_local_position->x) < _param_pld_hacc_rad.get()
-			    && fabsf(_target_pose.y_abs - vehicle_local_position->y) < _param_pld_hacc_rad.get()) {
+			if (fabsf(_target_pose.x_abs - vehicle_local_position->x) < _param_hacc_rad.get()
+			    && fabsf(_target_pose.y_abs - vehicle_local_position->y) < _param_hacc_rad.get()) {
 				// we've reached the position where we last saw the target. If we don't see it now, we need to do something
 				return _target_pose_valid && _target_pose.abs_pos_valid;
 
@@ -506,13 +494,13 @@ bool PrecLand::check_state_conditions(PrecLandState state)
 		} else {
 			// if not already in this state, need to be above target to enter it
 			return _target_pose_updated && _target_pose.abs_pos_valid
-			       && fabsf(_target_pose.x_abs - vehicle_local_position->x) < _param_pld_hacc_rad.get()
-			       && fabsf(_target_pose.y_abs - vehicle_local_position->y) < _param_pld_hacc_rad.get();
+			       && fabsf(_target_pose.x_abs - vehicle_local_position->x) < _param_hacc_rad.get()
+			       && fabsf(_target_pose.y_abs - vehicle_local_position->y) < _param_hacc_rad.get();
 		}
 
 	case PrecLandState::FinalApproach:
 		return _target_pose_valid && _target_pose.abs_pos_valid
-		       && (_target_pose.z_abs - vehicle_local_position->z) < _param_pld_fappr_alt.get();
+		       && (_target_pose.z_abs - vehicle_local_position->z) < _param_final_approach_alt.get();
 
 	case PrecLandState::Search:
 		return true;
@@ -557,21 +545,21 @@ void PrecLand::slewrate(float &sp_x, float &sp_y)
 	// limit the setpoint speed to the maximum cruise speed
 	matrix::Vector2f sp_vel = (sp_curr - _sp_pev) / dt; // velocity of the setpoints
 
-	if (sp_vel.length() > _param_xy_vel_cruise) {
-		sp_vel = sp_vel.normalized() * _param_xy_vel_cruise;
+	if (sp_vel.length() > _param_xy_vel_cruise.get()) {
+		sp_vel = sp_vel.normalized() * _param_xy_vel_cruise.get();
 		sp_curr = _sp_pev + sp_vel * dt;
 	}
 
 	// limit the setpoint acceleration to the maximum acceleration
 	matrix::Vector2f sp_acc = (sp_curr - _sp_pev * 2 + _sp_pev_prev) / (dt * dt); // acceleration of the setpoints
 
-	if (sp_acc.length() > _param_acceleration_hor) {
-		sp_acc = sp_acc.normalized() * _param_acceleration_hor;
+	if (sp_acc.length() > _param_acceleration_hor.get()) {
+		sp_acc = sp_acc.normalized() * _param_acceleration_hor.get();
 		sp_curr = _sp_pev * 2 - _sp_pev_prev + sp_acc * (dt * dt);
 	}
 
 	// limit the setpoint speed such that we can stop at the setpoint given the maximum acceleration/deceleration
-	float max_spd = sqrtf(_param_acceleration_hor * ((matrix::Vector2f)(_sp_pev - matrix::Vector2f(sp_x,
+	float max_spd = sqrtf(_param_acceleration_hor.get() * ((matrix::Vector2f)(_sp_pev - matrix::Vector2f(sp_x,
 			      sp_y))).length());
 	sp_vel = (sp_curr - _sp_pev) / dt; // velocity of the setpoints
 

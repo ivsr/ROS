@@ -42,14 +42,13 @@
 #include "vtol_type.h"
 #include "vtol_att_control_main.h"
 
-#include <float.h>
-#include <px4_platform_common/defines.h>
+#include <cfloat>
+#include <px4_defines.h>
 #include <matrix/math.hpp>
-
 
 VtolType::VtolType(VtolAttitudeControl *att_controller) :
 	_attc(att_controller),
-	_vtol_mode(mode::ROTARY_WING)
+	_vtol_mode(ROTARY_WING)
 {
 	_v_att = _attc->get_att();
 	_v_att_sp = _attc->get_att_sp();
@@ -63,7 +62,7 @@ VtolType::VtolType(VtolAttitudeControl *att_controller) :
 	_actuators_fw_in = _attc->get_actuators_fw_in();
 	_local_pos = _attc->get_local_pos();
 	_local_pos_sp = _attc->get_local_pos_sp();
-	_airspeed_validated = _attc->get_airspeed();
+	_airspeed = _attc->get_airspeed();
 	_tecs_status = _attc->get_tecs_status();
 	_land_detected = _attc->get_land_detected();
 	_params = _attc->get_params();
@@ -76,6 +75,8 @@ VtolType::VtolType(VtolAttitudeControl *att_controller) :
 		pwm_disarmed = PWM_MOTOR_OFF;
 	}
 }
+
+VtolType::~VtolType() = default;
 
 bool VtolType::init()
 {
@@ -96,13 +97,6 @@ bool VtolType::init()
 		return false;
 	}
 
-	ret = px4_ioctl(fd, PWM_SERVO_GET_MIN_PWM, (long unsigned int)&_min_mc_pwm_values);
-
-	if (ret != PX4_OK) {
-		PX4_ERR("failed getting min values");
-		px4_close(fd);
-		return false;
-	}
 
 	ret = px4_ioctl(fd, PWM_SERVO_GET_DISARMED_PWM, (long unsigned int)&_disarmed_pwm_values);
 
@@ -111,8 +105,6 @@ bool VtolType::init()
 		px4_close(fd);
 		return false;
 	}
-
-	px4_close(fd);
 
 	return true;
 
@@ -124,8 +116,8 @@ void VtolType::update_mc_state()
 		flag_idle_mc = set_idle_mc();
 	}
 
-	if (_motor_state != motor_state::ENABLED) {
-		_motor_state = VtolType::set_motor_state(_motor_state, motor_state::ENABLED);
+	if (_motor_state != ENABLED) {
+		_motor_state = VtolType::set_motor_state(_motor_state, ENABLED);
 	}
 
 	// copy virtual attitude setpoint to real attitude setpoint
@@ -134,7 +126,24 @@ void VtolType::update_mc_state()
 	_mc_roll_weight = 1.0f;
 	_mc_pitch_weight = 1.0f;
 	_mc_yaw_weight = 1.0f;
-	_mc_throttle_weight = 1.0f;
+
+	// VTOL weathervane
+	_v_att_sp->disable_mc_yaw_control = false;
+
+	if (_attc->get_pos_sp_triplet()->current.valid &&
+	    !_v_control_mode->flag_control_manual_enabled) {
+
+		if (_params->wv_takeoff && _attc->get_pos_sp_triplet()->current.type == position_setpoint_s::SETPOINT_TYPE_TAKEOFF) {
+			_v_att_sp->disable_mc_yaw_control = true;
+
+		} else if (_params->wv_loiter
+			   && _attc->get_pos_sp_triplet()->current.type == position_setpoint_s::SETPOINT_TYPE_LOITER) {
+			_v_att_sp->disable_mc_yaw_control = true;
+
+		} else if (_params->wv_land && _attc->get_pos_sp_triplet()->current.type == position_setpoint_s::SETPOINT_TYPE_LAND) {
+			_v_att_sp->disable_mc_yaw_control = true;
+		}
+	}
 }
 
 void VtolType::update_fw_state()
@@ -143,8 +152,8 @@ void VtolType::update_fw_state()
 		flag_idle_mc = !set_idle_fw();
 	}
 
-	if (_motor_state != motor_state::DISABLED) {
-		_motor_state = VtolType::set_motor_state(_motor_state, motor_state::DISABLED);
+	if (_motor_state != DISABLED) {
+		_motor_state = VtolType::set_motor_state(_motor_state, DISABLED);
 	}
 
 	// copy virtual attitude setpoint to real attitude setpoint
@@ -203,11 +212,11 @@ void VtolType::check_quadchute_condition()
 			// We use tecs for tracking in FW and local_pos_sp during transitions
 			if (_tecs_running) {
 				// 1 second rolling average
-				_ra_hrate = (49 * _ra_hrate + _tecs_status->height_rate) / 50;
-				_ra_hrate_sp = (49 * _ra_hrate_sp + _tecs_status->height_rate_setpoint) / 50;
+				_ra_hrate = (49 * _ra_hrate + _tecs_status->flightPathAngle) / 50;
+				_ra_hrate_sp = (49 * _ra_hrate_sp + _tecs_status->flightPathAngleSp) / 50;
 
 				// are we dropping while requesting significant ascend?
-				if (((_tecs_status->altitude_sp - _tecs_status->altitude_filtered) > _params->fw_alt_err) &&
+				if (((_tecs_status->altitudeSp - _tecs_status->altitude_filtered) > _params->fw_alt_err) &&
 				    (_ra_hrate < -1.0f) &&
 				    (_ra_hrate_sp > 1.0f)) {
 
@@ -244,17 +253,13 @@ void VtolType::check_quadchute_condition()
 
 bool VtolType::set_idle_mc()
 {
+
 	unsigned pwm_value = _params->idle_pwm_mc;
-	struct pwm_output_values pwm_values {};
+	struct pwm_output_values pwm_values;
+	memset(&pwm_values, 0, sizeof(pwm_values));
 
-	for (int i = 0; i < num_outputs_max; i++) {
-		if (is_channel_set(i, _params->vtol_motor_id)) {
-			pwm_values.values[i] = pwm_value;
-
-		} else {
-			pwm_values.values[i] = _min_mc_pwm_values.values[i];
-		}
-
+	for (int i = 0; i < _params->vtol_motor_count; i++) {
+		pwm_values.values[i] = pwm_value;
 		pwm_values.channel_count++;
 	}
 
@@ -263,16 +268,12 @@ bool VtolType::set_idle_mc()
 
 bool VtolType::set_idle_fw()
 {
-	struct pwm_output_values pwm_values {};
+	struct pwm_output_values pwm_values;
 
-	for (int i = 0; i < num_outputs_max; i++) {
-		if (is_channel_set(i, _params->vtol_motor_id)) {
-			pwm_values.values[i] = PWM_MOTOR_OFF;
+	memset(&pwm_values, 0, sizeof(pwm_values));
 
-		} else {
-			pwm_values.values[i] = _min_mc_pwm_values.values[i];
-		}
-
+	for (int i = 0; i < _params->vtol_motor_count; i++) {
+		pwm_values.values[i] = PWM_MOTOR_OFF;
 		pwm_values.channel_count++;
 	}
 
@@ -302,7 +303,7 @@ bool VtolType::apply_pwm_limits(struct pwm_output_values &pwm_values, pwm_limit_
 
 
 	if (ret != OK) {
-		PX4_DEBUG("failed setting max values");
+		PX4_ERR("failed setting max values");
 		return false;
 	}
 
@@ -312,39 +313,39 @@ bool VtolType::apply_pwm_limits(struct pwm_output_values &pwm_values, pwm_limit_
 motor_state VtolType::set_motor_state(const motor_state current_state, const motor_state next_state, const int value)
 {
 	struct pwm_output_values pwm_values = {};
-	pwm_values.channel_count = num_outputs_max;
+	pwm_values.channel_count = _params->vtol_motor_count;
 
 	// per default all motors are running
-	for (int i = 0; i < num_outputs_max; i++) {
+	for (int i = 0; i < _params->vtol_motor_count; i++) {
 		pwm_values.values[i] = _max_mc_pwm_values.values[i];
 	}
 
 	switch (next_state) {
-	case motor_state::ENABLED:
+	case ENABLED:
 		break;
 
-	case motor_state::DISABLED:
-		for (int i = 0; i < num_outputs_max; i++) {
-			if (is_channel_set(i, _params->fw_motors_off)) {
+	case DISABLED:
+		for (int i = 0; i < _params->vtol_motor_count; i++) {
+			if (is_motor_off_channel(i)) {
 				pwm_values.values[i] = _disarmed_pwm_values.values[i];
 			}
 		}
 
 		break;
 
-	case motor_state::IDLE:
+	case IDLE:
 
-		for (int i = 0; i < num_outputs_max; i++) {
-			if (is_channel_set(i, _params->vtol_motor_id)) {
+		for (int i = 0; i < _params->vtol_motor_count; i++) {
+			if (is_motor_off_channel(i)) {
 				pwm_values.values[i] = _params->idle_pwm_mc;
 			}
 		}
 
 		break;
 
-	case motor_state::VALUE:
-		for (int i = 0; i < num_outputs_max; i++) {
-			if (is_channel_set(i, _params->fw_motors_off)) {
+	case VALUE:
+		for (int i = 0; i < _params->vtol_motor_count; i++) {
+			if (is_motor_off_channel(i)) {
 				pwm_values.values[i] = value;
 			}
 		}
@@ -360,15 +361,14 @@ motor_state VtolType::set_motor_state(const motor_state current_state, const mot
 	}
 }
 
-bool VtolType::is_channel_set(const int channel, const int target)
+bool VtolType::is_motor_off_channel(const int channel)
 {
 	int channel_bitmap = 0;
 
 	int tmp;
-	int channels = target;
+	int channels = _params->fw_motors_off;
 
-
-	for (int i = 0; i < num_outputs_max; ++i) {
+	for (int i = 0; i < _params->vtol_motor_count; ++i) {
 		tmp = channels % 10;
 
 		if (tmp == 0) {

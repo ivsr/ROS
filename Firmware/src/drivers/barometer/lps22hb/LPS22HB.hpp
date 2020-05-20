@@ -33,19 +33,21 @@
 
 #pragma once
 
-#include <cstring>
-
+#include <drivers/device/CDev.hpp>
 #include <drivers/device/Device.hpp>
-#include <drivers/device/i2c.h>
-#include <drivers/device/spi.h>
-#include <drivers/drv_baro.h>
-#include <lib/cdev/CDev.hpp>
+#include <px4_config.h>
+#include <px4_workqueue.h>
+
 #include <perf/perf_counter.h>
-#include <px4_platform_common/getopt.h>
-#include <px4_platform_common/px4_work_queue/ScheduledWorkItem.hpp>
-#include <systemlib/err.h>
+
+#include <drivers/drv_baro.h>
+#include <drivers/drv_hrt.h>
+#include <drivers/device/ringbuffer.h>
+#include <drivers/drv_device.h>
+
 #include <uORB/uORB.h>
 
+#include <float.h>
 
 static constexpr uint8_t WHO_AM_I = 0x0F;
 static constexpr uint8_t LPS22HB_ID_WHO_AM_I = 0xB1;
@@ -81,7 +83,7 @@ extern device::Device *LPS22HB_SPI_interface(int bus);
 extern device::Device *LPS22HB_I2C_interface(int bus);
 typedef device::Device *(*LPS22HB_constructor)(int);
 
-class LPS22HB : public cdev::CDev, public px4::ScheduledWorkItem
+class LPS22HB : public device::CDev
 {
 public:
 	LPS22HB(device::Device *interface, const char *path);
@@ -97,10 +99,11 @@ public:
 	void			print_info();
 
 protected:
-	device::Device			*_interface;
+	Device			*_interface;
 
 private:
-	unsigned		_measure_interval{0};
+	work_s			_work{};
+	unsigned		_measure_ticks{0};
 
 	bool			_collect_phase{false};
 
@@ -112,7 +115,7 @@ private:
 	perf_counter_t		_sample_perf;
 	perf_counter_t		_comms_errors;
 
-	sensor_baro_s	_last_report{};           /**< used for info() */
+	baro_report	_last_report{};           /**< used for info() */
 
 	/**
 	 * Initialise the automatic measurement state machine and start it.
@@ -145,7 +148,15 @@ private:
 	 * and measurement to provide the most recent measurement possible
 	 * at the next interval.
 	 */
-	void			Run() override;
+	void			cycle();
+
+	/**
+	 * Static trampoline from the workq context; because we don't have a
+	 * generic workq wrapper yet.
+	 *
+	 * @param arg		Instance pointer for the driver that is polling.
+	 */
+	static void		cycle_trampoline(void *arg);
 
 	/**
 	 * Write a register.

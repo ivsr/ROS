@@ -1,7 +1,7 @@
 #ifndef BMM150_HPP_
 #define BMM150_HPP_
 
-#include <px4_platform_common/px4_config.h>
+#include <px4_config.h>
 
 #include <sys/types.h>
 #include <stdint.h>
@@ -16,11 +16,11 @@
 #include <stdio.h>
 #include <math.h>
 #include <unistd.h>
-#include <px4_platform_common/log.h>
+#include <px4_log.h>
 
 #include <perf/perf_counter.h>
 #include <systemlib/err.h>
-#include <px4_platform_common/px4_work_queue/ScheduledWorkItem.hpp>
+#include <nuttx/wqueue.h>
 #include <systemlib/conversions.h>
 
 #include <nuttx/arch.h>
@@ -191,7 +191,7 @@ struct bmm150_data {
 };
 
 
-class BMM150 : public device::I2C, public px4::ScheduledWorkItem
+class BMM150 : public device::I2C
 {
 public:
 	BMM150(int bus, const char *path, enum Rotation rotation);
@@ -217,6 +217,7 @@ protected:
 	virtual int       probe();
 
 private:
+	work_s            _work{};
 
 	bool _running;
 
@@ -277,7 +278,8 @@ private:
 	int     measure(); //start measure
 	int     collect(); //get results and publish
 
-	void	Run() override;
+	static void     cycle_trampoline(void *arg);
+	void            cycle(); //main execution
 
 	/**
 	 * Read the specified number of bytes from BMM150.

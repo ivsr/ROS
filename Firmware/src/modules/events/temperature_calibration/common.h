@@ -40,9 +40,8 @@
 #define TC_DEBUG(fmt, ...)
 #endif
 
-#include <px4_platform_common/log.h>
+#include <px4_log.h>
 #include <mathlib/mathlib.h>
-#include <lib/parameters/param.h>
 
 #include "polyfit.hpp"
 

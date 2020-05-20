@@ -36,8 +36,7 @@
  * Firmware uploader for PX4IO
  */
 
-#include <px4_platform_common/px4_config.h>
-#include <px4_platform_common/time.h>
+#include <px4_config.h>
 
 #include <sys/types.h>
 #include <stdlib.h>
@@ -68,6 +67,10 @@ PX4IO_Uploader::PX4IO_Uploader() :
 	_io_fd(-1),
 	_fw_fd(-1),
 	bl_rev(0)
+{
+}
+
+PX4IO_Uploader::~PX4IO_Uploader()
 {
 }
 
@@ -128,7 +131,7 @@ PX4IO_Uploader::upload(const char *filenames[])
 			break;
 
 		} else {
-			px4_usleep(10000);
+			usleep(10000);
 		}
 	}
 

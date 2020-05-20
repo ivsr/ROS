@@ -33,6 +33,10 @@
 
 #include "LPS22HB.hpp"
 
+#include <px4_getopt.h>
+
+#include <cstring>
+
 extern "C" __EXPORT int lps22hb_main(int argc, char *argv[]);
 
 enum LPS22HB_BUS {
@@ -230,6 +234,7 @@ usage()
 	PX4_INFO("    -X    (external I2C bus)");
 	PX4_INFO("    -I    (internal I2C bus)");
 	PX4_INFO("    -S    (external SPI bus)");
+	PX4_INFO("    -s    (internal SPI bus)");
 }
 
 } // namespace
@@ -243,14 +248,14 @@ lps22hb_main(int argc, char *argv[])
 
 	enum LPS22HB_BUS busid = LPS22HB_BUS_ALL;
 
-	while ((ch = px4_getopt(argc, argv, "IXS", &myoptind, &myoptarg)) != EOF) {
+	while ((ch = px4_getopt(argc, argv, "XIS:", &myoptind, &myoptarg)) != EOF) {
 		switch (ch) {
-#if (PX4_I2C_BUS_ONBOARD)
+#if (PX4_I2C_BUS_ONBOARD || PX4_SPIDEV_HMC)
 
 		case 'I':
 			busid = LPS22HB_BUS_I2C_INTERNAL;
 			break;
-#endif /* PX4_I2C_BUS_ONBOARD */
+#endif
 
 		case 'X':
 			busid = LPS22HB_BUS_I2C_EXTERNAL;

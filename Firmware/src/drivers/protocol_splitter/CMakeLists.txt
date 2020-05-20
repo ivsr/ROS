@@ -33,6 +33,7 @@
 px4_add_module(
 	MODULE drivers__protocol_splitter
 	MAIN protocol_splitter
+	STACK_MAIN 1200
 	SRCS
 		protocol_splitter.cpp
 	DEPENDS

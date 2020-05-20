@@ -49,7 +49,7 @@
 
 struct Params {
 	int32_t idle_pwm_mc;			// pwm value for idle in mc mode
-	int32_t vtol_motor_id;
+	int32_t vtol_motor_count;		// number of motors
 	int32_t vtol_type;
 	bool elevons_mc_lock;		// lock elevons in multicopter mode
 	float fw_min_alt;			// minimum relative altitude for FW mode (QuadChute)
@@ -58,6 +58,9 @@ struct Params {
 	float fw_qc_max_roll;		// maximum roll angle FW mode (QuadChute)
 	float front_trans_time_openloop;
 	float front_trans_time_min;
+	bool wv_takeoff;
+	bool wv_loiter;
+	bool wv_land;
 	float front_trans_duration;
 	float back_trans_duration;
 	float transition_airspeed;
@@ -68,19 +71,17 @@ struct Params {
 	float front_trans_timeout;
 	float mpc_xy_cruise;
 	int32_t fw_motors_off;			/**< bitmask of all motors that should be off in fixed wing mode */
-	int32_t diff_thrust;
-	float diff_thrust_scale;
 };
 
 // Has to match 1:1 msg/vtol_vehicle_status.msg
-enum class mode {
+enum mode {
 	TRANSITION_TO_FW = 1,
 	TRANSITION_TO_MC = 2,
 	ROTARY_WING = 3,
 	FIXED_WING = 4
 };
 
-enum class vtol_type {
+enum vtol_type {
 	TAILSITTER = 0,
 	TILTROTOR,
 	STANDARD
@@ -90,7 +91,7 @@ enum class vtol_type {
 // e.g. if we need to shut off some motors after transitioning to fixed wing mode
 // we can individually disable them while others might still need to be enabled to produce thrust.
 // we can select the target motors via VT_FW_MOT_OFFID
-enum class motor_state {
+enum motor_state {
 	ENABLED = 0,		// motor max pwm will be set to the standard max pwm value
 	DISABLED,			// motor max pwm will be set to a value that shuts the motor off
 	IDLE,				// motor max pwm will be set to VT_IDLE_PWM_MC
@@ -100,7 +101,7 @@ enum class motor_state {
 /**
  * @brief      Used to specify if min or max pwm values should be altered
  */
-enum class pwm_limit_type {
+enum pwm_limit_type {
 	TYPE_MINIMUM = 0,
 	TYPE_MAXIMUM
 };
@@ -115,7 +116,7 @@ public:
 	VtolType(const VtolType &) = delete;
 	VtolType &operator=(const VtolType &) = delete;
 
-	virtual ~VtolType() = default;
+	virtual ~VtolType();
 
 	/**
 	 * Initialise.
@@ -173,8 +174,6 @@ protected:
 	VtolAttitudeControl *_attc;
 	mode _vtol_mode;
 
-	static constexpr const int num_outputs_max = 8;
-
 	struct vehicle_attitude_s		*_v_att;				//vehicle attitude
 	struct vehicle_attitude_setpoint_s	*_v_att_sp;			//vehicle attitude setpoint
 	struct vehicle_attitude_setpoint_s *_mc_virtual_att_sp;	// virtual mc attitude setpoint
@@ -183,11 +182,11 @@ protected:
 	struct vtol_vehicle_status_s 		*_vtol_vehicle_status;
 	struct actuator_controls_s			*_actuators_out_0;			//actuator controls going to the mc mixer
 	struct actuator_controls_s			*_actuators_out_1;			//actuator controls going to the fw mixer (used for elevons)
-	struct actuator_controls_s			*_actuators_mc_in;			//actuator controls from mc_rate_control
+	struct actuator_controls_s			*_actuators_mc_in;			//actuator controls from mc_att_control
 	struct actuator_controls_s			*_actuators_fw_in;			//actuator controls from fw_att_control
 	struct vehicle_local_position_s			*_local_pos;
 	struct vehicle_local_position_setpoint_s	*_local_pos_sp;
-	struct airspeed_validated_s 				*_airspeed_validated;					// airspeed
+	struct airspeed_s 				*_airspeed;					// airspeed
 	struct tecs_status_s				*_tecs_status;
 	struct vehicle_land_detected_s			*_land_detected;
 
@@ -253,7 +252,6 @@ private:
 	/**
 	 * @brief      Stores the max pwm values given by the system.
 	 */
-	struct pwm_output_values _min_mc_pwm_values {};
 	struct pwm_output_values _max_mc_pwm_values {};
 	struct pwm_output_values _disarmed_pwm_values {};
 
@@ -268,14 +266,13 @@ private:
 	bool apply_pwm_limits(struct pwm_output_values &pwm_values, pwm_limit_type type);
 
 	/**
-	 * @brief      Determines if channel is set in target.
+	 * @brief      Determines if this channel is one selected by VT_FW_MOT_OFFID
 	 *
 	 * @param[in]  channel  The channel
-	 * @param[in]  target  	The target to check on.
 	 *
 	 * @return     True if motor off channel, False otherwise.
 	 */
-	bool is_channel_set(const int channel, const int target);
+	bool is_motor_off_channel(const int channel);
 
 };
 

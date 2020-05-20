@@ -48,12 +48,11 @@
 #include "mission_feasibility_checker.h"
 #include "navigator_mode.h"
 
-#include <float.h>
+#include <cfloat>
 
 #include <dataman/dataman.h>
 #include <drivers/drv_hrt.h>
-#include <px4_platform_common/module_params.h>
-#include <uORB/Subscription.hpp>
+#include <px4_module_params.h>
 #include <uORB/topics/home_position.h>
 #include <uORB/topics/mission.h>
 #include <uORB/topics/mission_result.h>
@@ -81,7 +80,15 @@ public:
 		MISSION_ALTMODE_FOH = 1
 	};
 
-	bool set_current_mission_index(uint16_t index);
+	enum mission_yaw_mode {
+		MISSION_YAWMODE_NONE = 0,
+		MISSION_YAWMODE_FRONT_TO_WAYPOINT = 1,
+		MISSION_YAWMODE_FRONT_TO_HOME = 2,
+		MISSION_YAWMODE_BACK_TO_HOME = 3,
+		MISSION_YAWMODE_MAX = 4
+	};
+
+	bool set_current_offboard_mission_index(uint16_t index);
 
 	bool land_start();
 	bool landing();
@@ -91,9 +98,6 @@ public:
 	bool get_mission_finished() const { return _mission_type == MISSION_TYPE_NONE; }
 	bool get_mission_changed() const { return _mission_changed ; }
 	bool get_mission_waypoints_changed() const { return _mission_waypoints_changed ; }
-	double get_landing_lat() { return _landing_lat; }
-	double get_landing_lon() { return _landing_lon; }
-	float get_landing_alt() { return _landing_alt; }
 
 	void set_closest_item_as_current();
 
@@ -106,9 +110,9 @@ public:
 private:
 
 	/**
-	 * Update mission topic
+	 * Update offboard mission topic
 	 */
-	void update_mission();
+	void update_offboard_mission();
 
 	/**
 	 * Move on to next mission item or switch to loiter
@@ -188,9 +192,9 @@ private:
 	bool read_mission_item(int offset, struct mission_item_s *mission_item);
 
 	/**
-	 * Save current mission state to dataman
+	 * Save current offboard mission state to dataman
 	 */
-	void save_mission_state();
+	void save_offboard_mission_state();
 
 	/**
 	 * Inform about a changed mission item after a DO_JUMP
@@ -203,9 +207,9 @@ private:
 	void set_mission_item_reached();
 
 	/**
-	 * Set the current mission item
+	 * Set the current offboard mission item
 	 */
-	void set_current_mission_item();
+	void set_current_offboard_mission_item();
 
 	/**
 	 * Check whether a mission is ready to go
@@ -213,9 +217,9 @@ private:
 	void check_mission_valid(bool force);
 
 	/**
-	 * Reset mission
+	 * Reset offboard mission
 	 */
-	void reset_mission(struct mission_s &mission);
+	void reset_offboard_mission(struct mission_s &mission);
 
 	/**
 	 * Returns true if we need to reset the mission
@@ -230,39 +234,36 @@ private:
 	/**
 	 * Find and store the index of the landing sequence (DO_LAND_START)
 	 */
-	bool find_mission_land_start();
+	bool find_offboard_land_start();
 
 	/**
-	 * Return the index of the closest mission item to the current global position.
+	 * Return the index of the closest offboard mission item to the current global position.
 	 */
 	int32_t index_closest_mission_item() const;
 
 	bool position_setpoint_equal(const position_setpoint_s *p1, const position_setpoint_s *p2) const;
 
 	DEFINE_PARAMETERS(
-		(ParamFloat<px4::params::MIS_DIST_1WP>) _param_mis_dist_1wp,
-		(ParamFloat<px4::params::MIS_DIST_WPS>) _param_mis_dist_wps,
-		(ParamInt<px4::params::MIS_ALTMODE>) _param_mis_altmode,
-		(ParamInt<px4::params::MIS_MNT_YAW_CTL>) _param_mis_mnt_yaw_ctl
+		(ParamFloat<px4::params::MIS_DIST_1WP>) _param_dist_1wp,
+		(ParamFloat<px4::params::MIS_DIST_WPS>) _param_dist_between_wps,
+		(ParamInt<px4::params::MIS_ALTMODE>) _param_altmode,
+		(ParamInt<px4::params::MIS_YAWMODE>) _param_yawmode,
+		(ParamInt<px4::params::MIS_MNT_YAW_CTL>) _param_mnt_yaw_ctl
 	)
 
-	uORB::Subscription	_mission_sub{ORB_ID(mission)};		/**< mission subscription */
-	mission_s		_mission {};
+	struct mission_s _offboard_mission {};
 
-	int32_t _current_mission_index{-1};
+	int32_t _current_offboard_mission_index{-1};
 
 	// track location of planned mission landing
 	bool	_land_start_available{false};
 	uint16_t _land_start_index{UINT16_MAX};		/**< index of DO_LAND_START, INVALID_DO_LAND_START if no planned landing */
-	double _landing_lat{0.0};
-	double _landing_lon{0.0};
-	float _landing_alt{0.0f};
 
 	bool _need_takeoff{true};					/**< if true, then takeoff must be performed before going to the first waypoint (if needed) */
 
 	enum {
 		MISSION_TYPE_NONE,
-		MISSION_TYPE_MISSION
+		MISSION_TYPE_OFFBOARD
 	} _mission_type{MISSION_TYPE_NONE};
 
 	bool _inited{false};

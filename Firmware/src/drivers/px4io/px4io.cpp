@@ -1,6 +1,6 @@
 /****************************************************************************
  *
- *   Copyright (c) 2012-2019 PX4 Development Team. All rights reserved.
+ *   Copyright (c) 2012-2015 PX4 Development Team. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -35,12 +35,11 @@
  * @file px4io.cpp
  * Driver for the PX4IO board.
  *
- * PX4IO is connected via DMA enabled high-speed UART.
+ * PX4IO is connected via I2C or DMA enabled high-speed UART.
  */
 
-#include <px4_platform_common/px4_config.h>
-#include <px4_platform_common/tasks.h>
-#include <px4_platform_common/sem.hpp>
+#include <px4_config.h>
+#include <px4_tasks.h>
 
 #include <sys/types.h>
 #include <stdint.h>
@@ -64,24 +63,17 @@
 #include <drivers/drv_rc_input.h>
 #include <drivers/drv_pwm_output.h>
 #include <drivers/drv_sbus.h>
+#include <drivers/drv_gpio.h>
 #include <drivers/drv_hrt.h>
 #include <drivers/drv_mixer.h>
 
-#include <rc/dsm.h>
-
-#include <lib/mathlib/mathlib.h>
-#include <lib/mixer/MixerGroup.hpp>
-#include <lib/mixer/MultirotorMixer/MultirotorMixer.hpp>
+#include <lib/mixer/mixer.h>
 #include <perf/perf_counter.h>
 #include <systemlib/err.h>
 #include <parameters/param.h>
 #include <circuit_breaker/circuit_breaker.h>
 #include <systemlib/mavlink_log.h>
 
-#include <uORB/Publication.hpp>
-#include <uORB/PublicationMulti.hpp>
-#include <uORB/PublicationQueued.hpp>
-#include <uORB/Subscription.hpp>
 #include <uORB/topics/actuator_controls.h>
 #include <uORB/topics/actuator_outputs.h>
 #include <uORB/topics/actuator_armed.h>
@@ -92,7 +84,6 @@
 #include <uORB/topics/servorail_status.h>
 #include <uORB/topics/parameter_update.h>
 #include <uORB/topics/multirotor_motor_limits.h>
-#include <uORB/topics/test_motor.h>
 
 #include <debug.h>
 
@@ -109,20 +100,16 @@
 #define PX4IO_REBOOT_BOOTLOADER		_IOC(0xff00, 2)
 #define PX4IO_CHECK_CRC			_IOC(0xff00, 3)
 
-static constexpr unsigned UPDATE_INTERVAL_MIN{2};	// 2 ms	-> 500 Hz
-static constexpr unsigned UPDATE_INTERVAL_MAX{100};	// 100 ms -> 10 Hz
-
+#define UPDATE_INTERVAL_MIN		2			// 2 ms	-> 500 Hz
 #define ORB_CHECK_INTERVAL		200000		// 200 ms -> 5 Hz
 #define IO_POLL_INTERVAL		20000		// 20 ms -> 50 Hz
-
-using namespace time_literals;
 
 /**
  * The PX4IO class.
  *
  * Encapsulates PX4FMU to PX4IO communications modeled as file operations.
  */
-class PX4IO : public cdev::CDev
+class PX4IO : public device::CDev
 {
 public:
 	/**
@@ -152,9 +139,8 @@ public:
 	 * Retrieve relevant initial system parameters. Initialize PX4IO registers.
 	 *
 	 * @param disable_rc_handling set to true to forbid override / RC handling on IO
-	 * @param hitl_mode set to suppress publication of actuator_outputs - instead defer to pwm_out_sim
 	 */
-	int			init(bool disable_rc_handling, bool hitl_mode);
+	int			init(bool disable_rc_handling);
 
 	/**
 	 * Detect if a PX4IO is connected.
@@ -195,6 +181,14 @@ public:
 	int      		set_update_rate(int rate);
 
 	/**
+	 * Push failsafe values to IO.
+	 *
+	 * @param[in] vals	Failsafe control inputs: in us PPM (900 for zero, 1500 for centered, 2100 for full)
+	 * @param[in] len	Number of channels, could up to 8
+	 */
+	int			set_failsafe_values(const uint16_t *vals, unsigned len);
+
+	/**
 	 * Disable RC input handling
 	 */
 	int			disable_rc_handling();
@@ -228,6 +222,7 @@ public:
 private:
 	device::Device		*_interface;
 
+	// XXX
 	unsigned		_hardware;		///< Hardware revision
 	unsigned		_max_actuators;		///< Maximum # of actuators supported by PX4IO
 	unsigned		_max_controls;		///< Maximum # of controls supported by PX4IO
@@ -257,23 +252,21 @@ private:
 
 	/* subscribed topics */
 	int			_t_actuator_controls_0;	///< actuator controls group 0 topic
-
-	uORB::Subscription	_t_actuator_controls_1{ORB_ID(actuator_controls_1)};	///< actuator controls group 1 topic
-	uORB::Subscription	_t_actuator_controls_2{ORB_ID(actuator_controls_2)};;	///< actuator controls group 2 topic
-	uORB::Subscription	_t_actuator_controls_3{ORB_ID(actuator_controls_3)};;	///< actuator controls group 3 topic
-	uORB::Subscription	_t_actuator_armed{ORB_ID(actuator_armed)};		///< system armed control topic
-	uORB::Subscription 	_t_vehicle_control_mode{ORB_ID(vehicle_control_mode)};	///< vehicle control mode topic
-	uORB::Subscription	_parameter_update_sub{ORB_ID(parameter_update)};	///< parameter update topic
-	uORB::Subscription	_t_vehicle_command{ORB_ID(vehicle_command)};		///< vehicle command topic
-
+	int			_t_actuator_controls_1;	///< actuator controls group 1 topic
+	int			_t_actuator_controls_2;	///< actuator controls group 2 topic
+	int			_t_actuator_controls_3;	///< actuator controls group 3 topic
+	int			_t_actuator_armed;	///< system armed control topic
+	int 			_t_vehicle_control_mode;///< vehicle control mode topic
+	int			_t_param;		///< parameter update topic
 	bool			_param_update_force;	///< force a parameter update
+	int			_t_vehicle_command;	///< vehicle command topic
 
 	/* advertised topics */
-	uORB::PublicationMulti<input_rc_s>			_to_input_rc{ORB_ID(input_rc)};
-	uORB::PublicationMulti<actuator_outputs_s>		_to_outputs{ORB_ID(actuator_outputs)};
-	uORB::PublicationMulti<multirotor_motor_limits_s>	_to_mixer_status{ORB_ID(multirotor_motor_limits)};
-	uORB::Publication<servorail_status_s>			_to_servorail{ORB_ID(servorail_status)};
-	uORB::Publication<safety_s>				_to_safety{ORB_ID(safety)};
+	orb_advert_t 		_to_input_rc;		///< rc inputs from io
+	orb_advert_t		_to_outputs;		///< mixed servo outputs topic
+	orb_advert_t		_to_servorail;		///< servorail status
+	orb_advert_t		_to_safety;		///< status of safety
+	orb_advert_t 		_to_mixer_status; 	///< mixer status flags
 
 	bool			_primary_pwm_device;	///< true if we are the default PWM output
 	bool			_lockdown_override;	///< allow to override the safety lockdown
@@ -290,15 +283,7 @@ private:
 	bool			_analog_rc_rssi_stable; ///< true when analog RSSI input is stable
 	float			_analog_rc_rssi_volt; ///< analog RSSI voltage
 
-	bool			_test_fmu_fail; ///< To test what happens if IO loses FMU
-
-	struct MotorTest {
-		uORB::Subscription test_motor_sub{ORB_ID(test_motor)};
-		bool in_test_mode{false};
-		hrt_abstime timeout{0};
-	};
-	MotorTest _motor_test;
-	bool                    _hitl_mode;     ///< Hardware-in-the-loop simulation mode - don't publish actuator_outputs
+	bool			_test_fmu_fail; ///< To test what happens if IO looses FMU
 
 	/**
 	 * Trampoline to the worker task
@@ -348,7 +333,7 @@ private:
 	 * @param input_rc	Input structure to populate.
 	 * @return		OK if data was returned.
 	 */
-	int			io_get_raw_rc_input(input_rc_s &input_rc);
+	int			io_get_raw_rc_input(rc_input_values &input_rc);
 
 	/**
 	 * Fetch and publish raw RC input data.
@@ -452,11 +437,6 @@ private:
 	 */
 	void			io_handle_vservo(uint16_t vservo, uint16_t vrssi);
 
-	/**
-	 * check and handle test_motor topic updates
-	 */
-	void handle_motor_test();
-
 	/* do not allow to copy this class due to ptr data members */
 	PX4IO(const PX4IO &);
 	PX4IO operator=(const PX4IO &);
@@ -464,13 +444,13 @@ private:
 
 namespace
 {
+
 PX4IO	*g_dev = nullptr;
+
 }
 
-#define PX4IO_DEVICE_PATH	"/dev/px4io"
-
 PX4IO::PX4IO(device::Device *interface) :
-	CDev(PX4IO_DEVICE_PATH),
+	CDev("px4io", PX4IO_DEVICE_PATH),
 	_interface(interface),
 	_hardware(0),
 	_max_actuators(0),
@@ -493,7 +473,19 @@ PX4IO::PX4IO(device::Device *interface) :
 	_last_written_arming_s(0),
 	_last_written_arming_c(0),
 	_t_actuator_controls_0(-1),
+	_t_actuator_controls_1(-1),
+	_t_actuator_controls_2(-1),
+	_t_actuator_controls_3(-1),
+	_t_actuator_armed(-1),
+	_t_vehicle_control_mode(-1),
+	_t_param(-1),
 	_param_update_force(false),
+	_t_vehicle_command(-1),
+	_to_input_rc(nullptr),
+	_to_outputs(nullptr),
+	_to_servorail(nullptr),
+	_to_safety(nullptr),
+	_to_mixer_status(nullptr),
 	_primary_pwm_device(false),
 	_lockdown_override(false),
 	_armed(false),
@@ -506,8 +498,7 @@ PX4IO::PX4IO(device::Device *interface) :
 	_thermal_control(-1),
 	_analog_rc_rssi_stable(false),
 	_analog_rc_rssi_volt(-1.0f),
-	_test_fmu_fail(false),
-	_hitl_mode(false)
+	_test_fmu_fail(false)
 {
 	/* we need this potentially before it could be set in task_main */
 	g_dev = this;
@@ -521,7 +512,7 @@ PX4IO::~PX4IO()
 	/* spin waiting for the task to stop */
 	for (unsigned i = 0; (i < 10) && (_task != -1); i++) {
 		/* give it another 100ms */
-		px4_usleep(100000);
+		usleep(100000);
 	}
 
 	/* well, kill it anyway, though this will probably crash */
@@ -560,10 +551,10 @@ PX4IO::detect()
 
 		if (protocol != PX4IO_PROTOCOL_VERSION) {
 			if (protocol == _io_reg_get_error) {
-				PX4_ERR("IO not installed");
+				DEVICE_LOG("IO not installed");
 
 			} else {
-				PX4_ERR("IO version error");
+				DEVICE_LOG("IO version error");
 				mavlink_log_emergency(&_mavlink_log_pub, "IO VERSION MISMATCH, PLEASE UPGRADE SOFTWARE!");
 			}
 
@@ -571,16 +562,15 @@ PX4IO::detect()
 		}
 	}
 
-	PX4_INFO("IO found");
+	DEVICE_LOG("IO found");
 
 	return 0;
 }
 
 int
-PX4IO::init(bool rc_handling_disabled, bool hitl_mode)
+PX4IO::init(bool rc_handling_disabled)
 {
 	_rc_handling_disabled = rc_handling_disabled;
-	_hitl_mode = hitl_mode;
 	return init();
 }
 
@@ -615,7 +605,7 @@ PX4IO::init()
 	hrt_abstime start_try_time = hrt_absolute_time();
 
 	do {
-		px4_usleep(2000);
+		usleep(2000);
 		protocol = io_reg_get(PX4IO_PAGE_CONFIG, PX4IO_P_CONFIG_PROTOCOL_VERSION);
 	} while (protocol == _io_reg_get_error && (hrt_elapsed_time(&start_try_time) < 700U * 1000U));
 
@@ -642,7 +632,7 @@ PX4IO::init()
 	    (_max_transfer < 16) || (_max_transfer > 255)  ||
 	    (_max_rc_input < 1)  || (_max_rc_input > 255)) {
 
-		PX4_ERR("config read error");
+		DEVICE_LOG("config read error");
 		mavlink_log_emergency(&_mavlink_log_pub, "[IO] config read fail, abort.");
 
 		// ask IO to reboot into bootloader as the failure may
@@ -700,22 +690,25 @@ PX4IO::init()
 		 * remains untouched (so manual override is still available).
 		 */
 
-		uORB::Subscription actuator_armed_sub{ORB_ID(actuator_armed)};
-
+		int safety_sub = orb_subscribe(ORB_ID(actuator_armed));
 		/* fill with initial values, clear updated flag */
-		actuator_armed_s actuator_armed{};
+		struct actuator_armed_s safety;
 		uint64_t try_start_time = hrt_absolute_time();
+		bool updated = false;
 
 		/* keep checking for an update, ensure we got a arming information,
 		   not something that was published a long time ago. */
 		do {
-			if (actuator_armed_sub.update(&actuator_armed)) {
-				// updated data, exit loop
+			orb_check(safety_sub, &updated);
+
+			if (updated) {
+				/* got data, copy and exit loop */
+				orb_copy(ORB_ID(actuator_armed), safety_sub, &safety);
 				break;
 			}
 
 			/* wait 10 ms */
-			px4_usleep(10000);
+			usleep(10000);
 
 			/* abort after 5s */
 			if ((hrt_absolute_time() - try_start_time) / 1000 > 3000) {
@@ -740,63 +733,39 @@ PX4IO::init()
 			errx(1, "PRM CMPID");
 		}
 
-		/* prepare vehicle command */
-		vehicle_command_s vcmd = {};
-		vcmd.target_system = (uint8_t)sys_id;
-		vcmd.target_component = (uint8_t)comp_id;
-		vcmd.source_system = (uint8_t)sys_id;
-		vcmd.source_component = (uint8_t)comp_id;
-		vcmd.confirmation = true; /* ask to confirm command */
-
-		if (reg & PX4IO_P_SETUP_ARMING_FORCE_FAILSAFE) {
-			mavlink_log_emergency(&_mavlink_log_pub, "IO is in failsafe, force failsafe");
-			/* send command to terminate flight via command API */
-			vcmd.timestamp = hrt_absolute_time();
-			vcmd.param1 = 1.0f; /* request flight termination */
-			vcmd.command = vehicle_command_s::VEHICLE_CMD_DO_FLIGHTTERMINATION;
-
-			/* send command once */
-			uORB::PublicationQueued<vehicle_command_s> vcmd_pub{ORB_ID(vehicle_command)};
-			vcmd_pub.publish(vcmd);
-
-			/* spin here until IO's state has propagated into the system */
-			do {
-				actuator_armed_sub.update(&actuator_armed);
-
-				/* wait 50 ms */
-				px4_usleep(50000);
-
-				/* abort after 5s */
-				if ((hrt_absolute_time() - try_start_time) / 1000 > 2000) {
-					mavlink_log_emergency(&_mavlink_log_pub, "Failed to recover from in-air restart (3), abort");
-					return 1;
-				}
-
-				/* re-send if necessary */
-				if (!actuator_armed.force_failsafe) {
-					vcmd_pub.publish(vcmd);
-					PX4_WARN("re-sending flight termination cmd");
-				}
-
-				/* keep waiting for state change for 2 s */
-			} while (!actuator_armed.force_failsafe);
-		}
-
 		/* send command to arm system via command API */
-		vcmd.timestamp = hrt_absolute_time();
-		vcmd.param1 = 1.0f; /* request arming */
-		vcmd.command = vehicle_command_s::VEHICLE_CMD_COMPONENT_ARM_DISARM;
+		struct vehicle_command_s cmd = {
+			.timestamp = hrt_absolute_time(),
+			.param5 = 0.0f,
+			.param6 = 0.0f,
+			/* request arming */
+			.param1 = 1.0f,
+			.param2 = 0.0f,
+			.param3 = 0.0f,
+			.param4 = 0.0f,
+			.param7 = 0.0f,
+			.command = vehicle_command_s::VEHICLE_CMD_COMPONENT_ARM_DISARM,
+			.target_system = (uint8_t)sys_id,
+			.target_component = (uint8_t)comp_id,
+			.source_system = (uint8_t)sys_id,
+			.source_component = (uint8_t)comp_id,
+			/* ask to confirm command */
+			.confirmation = 1
+		};
 
 		/* send command once */
-		uORB::PublicationQueued<vehicle_command_s> vcmd_pub{ORB_ID(vehicle_command)};
-		vcmd_pub.publish(vcmd);
+		orb_advert_t pub = orb_advertise_queue(ORB_ID(vehicle_command), &cmd, vehicle_command_s::ORB_QUEUE_LENGTH);
 
 		/* spin here until IO's state has propagated into the system */
 		do {
-			actuator_armed_sub.update(&actuator_armed);
+			orb_check(safety_sub, &updated);
+
+			if (updated) {
+				orb_copy(ORB_ID(actuator_armed), safety_sub, &safety);
+			}
 
 			/* wait 50 ms */
-			px4_usleep(50000);
+			usleep(50000);
 
 			/* abort after 5s */
 			if ((hrt_absolute_time() - try_start_time) / 1000 > 2000) {
@@ -805,13 +774,13 @@ PX4IO::init()
 			}
 
 			/* re-send if necessary */
-			if (!actuator_armed.armed) {
-				vcmd_pub.publish(vcmd);
-				PX4_WARN("re-sending arm cmd");
+			if (!safety.armed) {
+				orb_publish(ORB_ID(vehicle_command), pub, &cmd);
+				DEVICE_LOG("re-sending arm cmd");
 			}
 
 			/* keep waiting for state change for 2 s */
-		} while (!actuator_armed.armed);
+		} while (!safety.armed);
 
 		/* Indicate restart type is in-flight */
 		sys_restart_val = DM_INIT_REASON_IN_FLIGHT;
@@ -838,7 +807,7 @@ PX4IO::init()
 			ret = io_disable_rc_handling();
 
 			if (ret != OK) {
-				PX4_ERR("failed disabling RC handling");
+				DEVICE_LOG("failed disabling RC handling");
 				return ret;
 			}
 
@@ -885,7 +854,7 @@ PX4IO::init()
 				   nullptr);
 
 	if (_task < 0) {
-		PX4_ERR("task start failed: %d", errno);
+		DEVICE_DEBUG("task start failed: %d", errno);
 		return -errno;
 	}
 
@@ -910,9 +879,23 @@ PX4IO::task_main()
 	 */
 	_t_actuator_controls_0 = orb_subscribe(ORB_ID(actuator_controls_0));
 	orb_set_interval(_t_actuator_controls_0, 20);		/* default to 50Hz */
+	_t_actuator_controls_1 = orb_subscribe(ORB_ID(actuator_controls_1));
+	orb_set_interval(_t_actuator_controls_1, 33);		/* default to 30Hz */
+	_t_actuator_controls_2 = orb_subscribe(ORB_ID(actuator_controls_2));
+	orb_set_interval(_t_actuator_controls_2, 33);		/* default to 30Hz */
+	_t_actuator_controls_3 = orb_subscribe(ORB_ID(actuator_controls_3));
+	orb_set_interval(_t_actuator_controls_3, 33);		/* default to 30Hz */
+	_t_actuator_armed = orb_subscribe(ORB_ID(actuator_armed));
+	_t_vehicle_control_mode = orb_subscribe(ORB_ID(vehicle_control_mode));
+	_t_param = orb_subscribe(ORB_ID(parameter_update));
+	_t_vehicle_command = orb_subscribe(ORB_ID(vehicle_command));
 
-	if (_t_actuator_controls_0 < 0) {
-		PX4_ERR("actuator subscription failed");
+	if ((_t_actuator_controls_0 < 0) ||
+	    (_t_actuator_armed < 0) ||
+	    (_t_vehicle_control_mode < 0) ||
+	    (_t_param < 0) ||
+	    (_t_vehicle_command < 0)) {
+		warnx("subscription(s) failed");
 		goto out;
 	}
 
@@ -934,7 +917,13 @@ PX4IO::task_main()
 
 		/* adjust update interval */
 		if (_update_interval != 0) {
-			_update_interval = math::constrain(_update_interval, UPDATE_INTERVAL_MIN, UPDATE_INTERVAL_MAX);
+			if (_update_interval < UPDATE_INTERVAL_MIN) {
+				_update_interval = UPDATE_INTERVAL_MIN;
+			}
+
+			if (_update_interval > 100) {
+				_update_interval = 100;
+			}
 
 			orb_set_interval(_t_actuator_controls_0, _update_interval);
 			/*
@@ -966,13 +955,6 @@ PX4IO::task_main()
 			(void)io_set_control_groups();
 		}
 
-		if (!_armed && !_lockdown_override) {
-			handle_motor_test();
-
-		} else {
-			_motor_test.in_test_mode = false;
-		}
-
 		if (now >= poll_last + IO_POLL_INTERVAL) {
 			/* run at 50-250Hz */
 			poll_last = now;
@@ -990,10 +972,10 @@ PX4IO::task_main()
 			bool updated = false;
 
 			/* arming state */
-			updated = _t_actuator_armed.updated();
+			orb_check(_t_actuator_armed, &updated);
 
 			if (!updated) {
-				updated = _t_vehicle_control_mode.updated();
+				orb_check(_t_vehicle_control_mode, &updated);
 			}
 
 			if (updated) {
@@ -1005,10 +987,15 @@ PX4IO::task_main()
 			/* run at 5Hz */
 			orb_check_last = now;
 
+			/* check updates on uORB topics and handle it */
+			bool updated = false;
+
 			/* vehicle command */
-			if (_t_vehicle_command.updated()) {
-				vehicle_command_s cmd{};
-				_t_vehicle_command.copy(&cmd);
+			orb_check(_t_vehicle_command, &updated);
+
+			if (updated) {
+				struct vehicle_command_s cmd;
+				orb_copy(ORB_ID(vehicle_command), _t_vehicle_command, &cmd);
 
 				// Check for a DSM pairing command
 				if (((unsigned int)cmd.command == vehicle_command_s::VEHICLE_CMD_START_RX_PAIR) && ((int)cmd.param1 == 0)) {
@@ -1021,14 +1008,12 @@ PX4IO::task_main()
 			 *
 			 * XXX this may be a bit spammy
 			 */
+			orb_check(_t_param, &updated);
 
-			// check for parameter updates
-			if (_parameter_update_sub.updated() || _param_update_force) {
-				// clear update
-				parameter_update_s pupdate;
-				_parameter_update_sub.copy(&pupdate);
-
+			if (updated || _param_update_force) {
 				_param_update_force = false;
+				parameter_update_s pupdate;
+				orb_copy(ORB_ID(parameter_update), _t_param, &pupdate);
 
 				if (!_rc_handling_disabled) {
 					/* re-upload RC input config as it may have changed */
@@ -1054,15 +1039,21 @@ PX4IO::task_main()
 					}
 				}
 
-				/* Check if the IO safety circuit breaker has been updated */
-				bool circuit_breaker_io_safety_enabled = circuit_breaker_enabled("CBRK_IO_SAFETY", CBRK_IO_SAFETY_KEY);
-				/* Bypass IO safety switch logic by setting FORCE_SAFETY_OFF */
-				(void)io_reg_set(PX4IO_PAGE_SETUP, PX4IO_P_SETUP_FORCE_SAFETY_OFF, circuit_breaker_io_safety_enabled);
+				int32_t safety_param_val;
+				param_t safety_param = param_find("CBRK_IO_SAFETY");
+
+				if (safety_param != PARAM_INVALID) {
+
+					param_get(safety_param, &safety_param_val);
+
+					if (safety_param_val == PX4IO_FORCE_SAFETY_MAGIC) {
+						/* disable IO safety if circuit breaker asked for it */
+						(void)io_reg_set(PX4IO_PAGE_SETUP, PX4IO_P_SETUP_FORCE_SAFETY_OFF, safety_param_val);
+					}
+				}
 
 				/* Check if the flight termination circuit breaker has been updated */
 				_cb_flighttermination = circuit_breaker_enabled("CBRK_FLIGHTTERM", CBRK_FLIGHTTERM_KEY);
-				/* Tell IO that it can terminate the flight if FMU is not responding or if a failure has been reported by the FailureDetector logic */
-				(void)io_reg_set(PX4IO_PAGE_SETUP, PX4IO_P_SETUP_ENABLE_FLIGHTTERMINATION, !_cb_flighttermination);
 
 				param_get(param_find("RC_RSSI_PWM_CHAN"), &_rssi_pwm_chan);
 				param_get(param_find("RC_RSSI_PWM_MAX"), &_rssi_pwm_max);
@@ -1238,7 +1229,7 @@ PX4IO::task_main()
 	unlock();
 
 out:
-	PX4_DEBUG("exiting");
+	DEVICE_DEBUG("exiting");
 
 	/* clean up the alternate device node */
 	if (_primary_pwm_device) {
@@ -1266,7 +1257,8 @@ PX4IO::io_set_control_groups()
 int
 PX4IO::io_set_control_state(unsigned group)
 {
-	actuator_controls_s	controls{};	///< actuator outputs
+	actuator_controls_s	controls;	///< actuator outputs
+	uint16_t 		regs[_max_actuators];
 
 	/* get controls */
 	bool changed = false;
@@ -1282,16 +1274,31 @@ PX4IO::io_set_control_state(unsigned group)
 		}
 		break;
 
-	case 1:
-		changed = _t_actuator_controls_1.update(&controls);
+	case 1: {
+			orb_check(_t_actuator_controls_1, &changed);
+
+			if (changed) {
+				orb_copy(ORB_ID(actuator_controls_1), _t_actuator_controls_1, &controls);
+			}
+		}
 		break;
 
-	case 2:
-		changed = _t_actuator_controls_2.update(&controls);
+	case 2: {
+			orb_check(_t_actuator_controls_2, &changed);
+
+			if (changed) {
+				orb_copy(ORB_ID(actuator_controls_2), _t_actuator_controls_2, &controls);
+			}
+		}
 		break;
 
-	case 3:
-		changed = _t_actuator_controls_3.update(&controls);
+	case 3: {
+			orb_check(_t_actuator_controls_3, &changed);
+
+			if (changed) {
+				orb_copy(ORB_ID(actuator_controls_3), _t_actuator_controls_3, &controls);
+			}
+		}
 		break;
 	}
 
@@ -1306,23 +1313,22 @@ PX4IO::io_set_control_state(unsigned group)
 		controls.control[3] = 1.0f;
 	}
 
-	uint16_t regs[_max_actuators];
-
 	for (unsigned i = 0; i < _max_controls; i++) {
+
 		/* ensure FLOAT_TO_REG does not produce an integer overflow */
-		const float ctrl = math::constrain(controls.control[i], -1.0f, 1.0f);
+		float ctrl = controls.control[i];
 
-		if (!isfinite(ctrl)) {
-			regs[i] = INT16_MAX;
+		if (ctrl < -1.0f) {
+			ctrl = -1.0f;
 
-		} else {
-			regs[i] = FLOAT_TO_REG(ctrl);
+		} else if (ctrl > 1.0f) {
+			ctrl = 1.0f;
 		}
 
-
+		regs[i] = FLOAT_TO_REG(ctrl);
 	}
 
-	if (!_test_fmu_fail && !_motor_test.in_test_mode) {
+	if (!_test_fmu_fail) {
 		/* copy values to registers in IO */
 		return io_reg_set(PX4IO_PAGE_CONTROLS, group * PX4IO_PROTOCOL_MAX_CONTROL_COUNT, regs, _max_controls);
 
@@ -1331,83 +1337,21 @@ PX4IO::io_set_control_state(unsigned group)
 	}
 }
 
-void
-PX4IO::handle_motor_test()
-{
-	test_motor_s test_motor;
-
-	while (_motor_test.test_motor_sub.update(&test_motor)) {
-		if (test_motor.driver_instance != 0 ||
-		    hrt_elapsed_time(&test_motor.timestamp) > 100_ms) {
-			continue;
-		}
-
-		bool in_test_mode = test_motor.action == test_motor_s::ACTION_RUN;
-
-		if (in_test_mode != _motor_test.in_test_mode) {
-			// reset all outputs to disarmed on state change
-			pwm_output_values pwm_disarmed;
-
-			if (io_reg_get(PX4IO_PAGE_DISARMED_PWM, 0, pwm_disarmed.values, _max_actuators) == 0) {
-				for (unsigned i = 0; i < _max_actuators; ++i) {
-					io_reg_set(PX4IO_PAGE_DIRECT_PWM, i, pwm_disarmed.values[i]);
-				}
-			}
-		}
-
-		if (in_test_mode) {
-			unsigned idx = test_motor.motor_number;
-
-			if (idx < _max_actuators) {
-				if (test_motor.value < 0.f) {
-					pwm_output_values pwm_disarmed;
-
-					if (io_reg_get(PX4IO_PAGE_DISARMED_PWM, 0, pwm_disarmed.values, _max_actuators) == 0) {
-						io_reg_set(PX4IO_PAGE_DIRECT_PWM, idx, pwm_disarmed.values[idx]);
-					}
-
-				} else {
-					pwm_output_values pwm_min;
-					pwm_output_values pwm_max;
-
-					if (io_reg_get(PX4IO_PAGE_CONTROL_MIN_PWM, 0, pwm_min.values, _max_actuators) == 0 &&
-					    io_reg_get(PX4IO_PAGE_CONTROL_MAX_PWM, 0, pwm_max.values, _max_actuators) == 0) {
-
-						uint16_t value = math::constrain<uint16_t>(pwm_min.values[idx] +
-								 (uint16_t)((pwm_max.values[idx] - pwm_min.values[idx]) * test_motor.value),
-								 pwm_min.values[idx], pwm_max.values[idx]);
-						io_reg_set(PX4IO_PAGE_DIRECT_PWM, idx, value);
-					}
-				}
-			}
-
-			if (test_motor.timeout_ms > 0) {
-				_motor_test.timeout = test_motor.timestamp + test_motor.timeout_ms * 1000;
-
-			} else {
-				_motor_test.timeout = 0;
-			}
-		}
-
-		_motor_test.in_test_mode = in_test_mode;
-	}
-
-	// check for timeouts
-	if (_motor_test.timeout != 0 && hrt_absolute_time() > _motor_test.timeout) {
-		_motor_test.in_test_mode = false;
-		_motor_test.timeout = 0;
-	}
-}
 
 int
 PX4IO::io_set_arming_state()
 {
+	actuator_armed_s	armed;		///< system armed state
+	vehicle_control_mode_s	control_mode;	///< vehicle_control_mode
+
+	int have_armed = orb_copy(ORB_ID(actuator_armed), _t_actuator_armed, &armed);
+	int have_control_mode = orb_copy(ORB_ID(vehicle_control_mode), _t_vehicle_control_mode, &control_mode);
+	_in_esc_calibration_mode = armed.in_esc_calibration_mode;
+
 	uint16_t set = 0;
 	uint16_t clear = 0;
 
-	actuator_armed_s armed;
-
-	if (_t_actuator_armed.copy(&armed)) {
+	if (have_armed == OK) {
 		_in_esc_calibration_mode = armed.in_esc_calibration_mode;
 
 		if (armed.armed || _in_esc_calibration_mode) {
@@ -1419,13 +1363,6 @@ PX4IO::io_set_arming_state()
 
 		_armed = armed.armed;
 
-		if (armed.prearmed) {
-			set |= PX4IO_P_SETUP_ARMING_FMU_PREARMED;
-
-		} else {
-			clear |= PX4IO_P_SETUP_ARMING_FMU_PREARMED;
-		}
-
 		if ((armed.lockdown || armed.manual_lockdown) && !_lockdown_override) {
 			set |= PX4IO_P_SETUP_ARMING_LOCKDOWN;
 			_lockdown_override = true;
@@ -1435,7 +1372,8 @@ PX4IO::io_set_arming_state()
 			_lockdown_override = false;
 		}
 
-		if (armed.force_failsafe) {
+		/* Do not set failsafe if circuit breaker is enabled */
+		if (armed.force_failsafe && !_cb_flighttermination) {
 			set |= PX4IO_P_SETUP_ARMING_FORCE_FAILSAFE;
 
 		} else {
@@ -1458,9 +1396,7 @@ PX4IO::io_set_arming_state()
 		}
 	}
 
-	vehicle_control_mode_s control_mode;
-
-	if (_t_vehicle_control_mode.copy(&control_mode)) {
+	if (have_control_mode == OK) {
 		if (control_mode.flag_external_manual_override_ok) {
 			set |= PX4IO_P_SETUP_ARMING_MANUAL_OVERRIDE_OK;
 			_override_available = true;
@@ -1637,7 +1573,7 @@ PX4IO::io_set_rc_config()
 		ret = io_reg_set(PX4IO_PAGE_RC_CONFIG, offset, regs, PX4IO_P_RC_CONFIG_STRIDE);
 
 		if (ret != OK) {
-			PX4_ERR("rc config upload failed");
+			DEVICE_LOG("rc config upload failed");
 			break;
 		}
 
@@ -1689,14 +1625,20 @@ PX4IO::io_handle_status(uint16_t status)
 	/**
 	 * Get and handle the safety status
 	 */
-	safety_s safety{};
+	struct safety_s safety;
 	safety.timestamp = hrt_absolute_time();
 	safety.safety_switch_available = true;
 	safety.safety_off = (status & PX4IO_P_STATUS_FLAGS_SAFETY_OFF) ? true : false;
 	safety.override_available = _override_available;
 	safety.override_enabled = (status & PX4IO_P_STATUS_FLAGS_OVERRIDE) ? true : false;
 
-	_to_safety.publish(safety);
+	/* lazily publish the safety status */
+	if (_to_safety != nullptr) {
+		orb_publish(ORB_ID(safety), _to_safety, &safety);
+
+	} else {
+		_to_safety = orb_advertise(ORB_ID(safety), &safety);
+	}
 
 	return ret;
 }
@@ -1735,7 +1677,7 @@ PX4IO::io_handle_alarms(uint16_t alarms)
 void
 PX4IO::io_handle_vservo(uint16_t vservo, uint16_t vrssi)
 {
-	servorail_status_s servorail_status{};
+	servorail_status_s servorail_status = {};
 
 	servorail_status.timestamp = hrt_absolute_time();
 
@@ -1754,7 +1696,12 @@ PX4IO::io_handle_vservo(uint16_t vservo, uint16_t vrssi)
 	}
 
 	/* lazily publish the servorail voltages */
-	_to_servorail.publish(servorail_status);
+	if (_to_servorail != nullptr) {
+		orb_publish(ORB_ID(servorail_status), _to_servorail, &servorail_status);
+
+	} else {
+		_to_servorail = orb_advertise(ORB_ID(servorail_status), &servorail_status);
+	}
 }
 
 int
@@ -1782,7 +1729,7 @@ PX4IO::io_get_status()
 }
 
 int
-PX4IO::io_get_raw_rc_input(input_rc_s &input_rc)
+PX4IO::io_get_raw_rc_input(rc_input_values &input_rc)
 {
 	uint32_t channel_count;
 	int	ret;
@@ -1822,7 +1769,7 @@ PX4IO::io_get_raw_rc_input(input_rc_s &input_rc)
 	input_rc.rc_ppm_frame_length = regs[PX4IO_P_RAW_RC_DATA];
 
 	if (!_analog_rc_rssi_stable) {
-		input_rc.rssi = regs[PX4IO_P_RAW_RC_NRSSI];
+		input_rc.rssi = 255;// we do not actually get digital RSSI regs[PX4IO_P_RAW_RC_NRSSI];
 
 	} else {
 		float rssi_analog = ((_analog_rc_rssi_volt - 0.2f) / 3.0f) * 100.0f;
@@ -1889,7 +1836,7 @@ PX4IO::io_publish_raw_rc()
 {
 
 	/* fetch values from IO */
-	input_rc_s	rc_val;
+	rc_input_values	rc_val;
 
 	/* set the RC status flag ORDER MATTERS! */
 	rc_val.rc_lost = !(_status & PX4IO_P_STATUS_FLAGS_RC_OK);
@@ -1923,7 +1870,13 @@ PX4IO::io_publish_raw_rc()
 		}
 	}
 
-	_to_input_rc.publish(rc_val);
+	/* lazily advertise on first publication */
+	if (_to_input_rc == nullptr) {
+		_to_input_rc = orb_advertise(ORB_ID(input_rc), &rc_val);
+
+	} else {
+		orb_publish(ORB_ID(input_rc), _to_input_rc, &rc_val);
+	}
 
 	return OK;
 }
@@ -1931,10 +1884,6 @@ PX4IO::io_publish_raw_rc()
 int
 PX4IO::io_publish_pwm_outputs()
 {
-	if (_hitl_mode) {
-		return OK;
-	}
-
 	/* get servo values from IO */
 	uint16_t ctl[_max_actuators];
 	int ret = io_reg_get(PX4IO_PAGE_SERVOS, 0, ctl, _max_actuators);
@@ -1952,7 +1901,8 @@ PX4IO::io_publish_pwm_outputs()
 		outputs.output[i] = ctl[i];
 	}
 
-	_to_outputs.publish(outputs);
+	int instance;
+	orb_publish_auto(ORB_ID(actuator_outputs), &_to_outputs, &outputs, &instance, ORB_PRIO_DEFAULT);
 
 	/* get mixer status flags from IO */
 	MultirotorMixer::saturation_status saturation_status;
@@ -1964,11 +1914,11 @@ PX4IO::io_publish_pwm_outputs()
 
 	/* publish mixer status */
 	if (saturation_status.flags.valid) {
-		multirotor_motor_limits_s motor_limits{};
+		multirotor_motor_limits_s motor_limits;
 		motor_limits.timestamp = hrt_absolute_time();
 		motor_limits.saturation_status = saturation_status.value;
 
-		_to_mixer_status.publish(motor_limits);
+		orb_publish_auto(ORB_ID(multirotor_motor_limits), &_to_mixer_status, &motor_limits, &instance, ORB_PRIO_DEFAULT);
 	}
 
 	return OK;
@@ -1979,14 +1929,14 @@ PX4IO::io_reg_set(uint8_t page, uint8_t offset, const uint16_t *values, unsigned
 {
 	/* range check the transfer */
 	if (num_values > ((_max_transfer) / sizeof(*values))) {
-		PX4_DEBUG("io_reg_set: too many registers (%u, max %u)", num_values, _max_transfer / 2);
+		DEVICE_DEBUG("io_reg_set: too many registers (%u, max %u)", num_values, _max_transfer / 2);
 		return -EINVAL;
 	}
 
 	int ret =  _interface->write((page << 8) | offset, (void *)values, num_values);
 
 	if (ret != (int)num_values) {
-		PX4_DEBUG("io_reg_set(%hhu,%hhu,%u): error %d", page, offset, num_values, ret);
+		DEVICE_DEBUG("io_reg_set(%hhu,%hhu,%u): error %d", page, offset, num_values, ret);
 		return -1;
 	}
 
@@ -2004,14 +1954,14 @@ PX4IO::io_reg_get(uint8_t page, uint8_t offset, uint16_t *values, unsigned num_v
 {
 	/* range check the transfer */
 	if (num_values > ((_max_transfer) / sizeof(*values))) {
-		PX4_DEBUG("io_reg_get: too many registers (%u, max %u)", num_values, _max_transfer / 2);
+		DEVICE_DEBUG("io_reg_get: too many registers (%u, max %u)", num_values, _max_transfer / 2);
 		return -EINVAL;
 	}
 
 	int ret = _interface->read((page << 8) | offset, reinterpret_cast<void *>(values), num_values);
 
 	if (ret != (int)num_values) {
-		PX4_DEBUG("io_reg_get(%hhu,%hhu,%u): data error %d", page, offset, num_values, ret);
+		DEVICE_DEBUG("io_reg_get(%hhu,%hhu,%u): data error %d", page, offset, num_values, ret);
 		return -1;
 	}
 
@@ -2051,7 +2001,7 @@ PX4IO::io_reg_modify(uint8_t page, uint8_t offset, uint16_t clearbits, uint16_t 
 int
 PX4IO::print_debug()
 {
-#ifdef CONFIG_ARCH_BOARD_PX4_FMU_V2
+#ifdef CONFIG_ARCH_BOARD_PX4FMU_V2
 	int io_fd = -1;
 
 	if (io_fd <= 0) {
@@ -2064,7 +2014,7 @@ PX4IO::print_debug()
 		fds[0].fd = io_fd;
 		fds[0].events = POLLIN;
 
-		px4_usleep(500);
+		usleep(500);
 		int pret = ::poll(fds, sizeof(fds) / sizeof(fds[0]), 0);
 
 		if (pret > 0) {
@@ -2145,7 +2095,7 @@ PX4IO::mixer_send(const char *buf, unsigned buflen, unsigned retries)
 				ret = io_reg_set(PX4IO_PAGE_MIXERLOAD, 0, (uint16_t *)frame, total_len / 2);
 
 				if (ret) {
-					px4_usleep(333);
+					usleep(333);
 
 				} else {
 					break;
@@ -2162,7 +2112,7 @@ PX4IO::mixer_send(const char *buf, unsigned buflen, unsigned retries)
 			}
 
 			if (ret) {
-				PX4_ERR("mixer send error %d", ret);
+				DEVICE_LOG("mixer send error %d", ret);
 				return ret;
 			}
 
@@ -2181,7 +2131,7 @@ PX4IO::mixer_send(const char *buf, unsigned buflen, unsigned retries)
 			ret = io_reg_set(PX4IO_PAGE_MIXERLOAD, 0, (uint16_t *)frame, (sizeof(px4io_mixdata) + 2) / 2);
 
 			if (ret) {
-				px4_usleep(333);
+				usleep(333);
 
 			} else {
 				break;
@@ -2259,7 +2209,7 @@ PX4IO::print_status(bool extended_status)
 	       ((alarms & PX4IO_P_STATUS_ALARMS_PWM_ERROR)     ? " PWM_ERROR" : ""),
 	       ((alarms & PX4IO_P_STATUS_ALARMS_VSERVO_FAULT)  ? " VSERVO_FAULT" : ""));
 	/* now clear alarms */
-	io_reg_set(PX4IO_PAGE_STATUS, PX4IO_P_STATUS_ALARMS, 0x0000);
+	io_reg_set(PX4IO_PAGE_STATUS, PX4IO_P_STATUS_ALARMS, 0xFFFF);
 
 	if (_hardware == 2) {
 		printf("vservo %u mV vservo scale %u\n",
@@ -2357,7 +2307,6 @@ PX4IO::print_status(bool extended_status)
 	printf("arming 0x%04hx%s%s%s%s%s%s%s%s%s%s\n",
 	       arming,
 	       ((arming & PX4IO_P_SETUP_ARMING_FMU_ARMED)		? " FMU_ARMED" : " FMU_DISARMED"),
-	       ((arming & PX4IO_P_SETUP_ARMING_FMU_PREARMED)		? " FMU_PREARMED" : " FMU_NOT_PREARMED"),
 	       ((arming & PX4IO_P_SETUP_ARMING_IO_ARM_OK)		? " IO_ARM_OK" : " IO_ARM_DENIED"),
 	       ((arming & PX4IO_P_SETUP_ARMING_MANUAL_OVERRIDE_OK)	? " MANUAL_OVERRIDE_OK" : ""),
 	       ((arming & PX4IO_P_SETUP_ARMING_FAILSAFE_CUSTOM)		? " FAILSAFE_CUSTOM" : ""),
@@ -2426,17 +2375,12 @@ PX4IO::print_status(bool extended_status)
 		}
 	}
 
-	if (_hitl_mode) {
-		printf("\nHITL Mode");
-	}
-
 	printf("\n");
 }
 
 int
 PX4IO::ioctl(file *filep, int cmd, unsigned long arg)
 {
-	SmartLock lock_guard(_lock);
 	int ret = OK;
 
 	/* regular ioctl? */
@@ -2713,12 +2657,12 @@ PX4IO::ioctl(file *filep, int cmd, unsigned long arg)
 		    arg == DSMX_BIND_PULSES ||
 		    arg == DSMX8_BIND_PULSES) {
 			io_reg_set(PX4IO_PAGE_SETUP, PX4IO_P_SETUP_DSM, dsm_bind_power_down);
-			px4_usleep(500000);
+			usleep(500000);
 			io_reg_set(PX4IO_PAGE_SETUP, PX4IO_P_SETUP_DSM, dsm_bind_set_rx_out);
 			io_reg_set(PX4IO_PAGE_SETUP, PX4IO_P_SETUP_DSM, dsm_bind_power_up);
-			px4_usleep(72000);
+			usleep(72000);
 			io_reg_set(PX4IO_PAGE_SETUP, PX4IO_P_SETUP_DSM, dsm_bind_send_pulses | (arg << 4));
-			px4_usleep(50000);
+			usleep(50000);
 			io_reg_set(PX4IO_PAGE_SETUP, PX4IO_P_SETUP_DSM, dsm_bind_reinit_uart);
 
 			ret = OK;
@@ -2745,7 +2689,7 @@ PX4IO::ioctl(file *filep, int cmd, unsigned long arg)
 				ret = -EINVAL;
 
 			} else {
-				if (!_test_fmu_fail && _motor_test.in_test_mode) {
+				if (!_test_fmu_fail) {
 					/* send a direct PWM value */
 					ret = io_reg_set(PX4IO_PAGE_DIRECT_PWM, channel, arg);
 
@@ -2794,20 +2738,21 @@ PX4IO::ioctl(file *filep, int cmd, unsigned long arg)
 			break;
 		}
 
-	case PWM_SERVO_SET_MODE: {
-			// reset all channels to disarmed when entering/leaving test mode, so that we don't
-			// accidentially use values from previous tests
-			pwm_output_values pwm_disarmed;
-
-			if (io_reg_get(PX4IO_PAGE_DISARMED_PWM, 0, pwm_disarmed.values, _max_actuators) == 0) {
-				for (unsigned i = 0; i < _max_actuators; ++i) {
-					io_reg_set(PX4IO_PAGE_DIRECT_PWM, i, pwm_disarmed.values[i]);
-				}
-			}
-
-			_motor_test.in_test_mode = (arg == PWM_SERVO_ENTER_TEST_MODE);
-			ret = (arg == PWM_SERVO_ENTER_TEST_MODE || PWM_SERVO_EXIT_TEST_MODE) ? 0 : -EINVAL;
+	case GPIO_RESET: {
+			ret = -EINVAL;
+			break;
 		}
+
+	case GPIO_SET:
+		ret = -EINVAL;
+		break;
+
+	case GPIO_CLEAR:
+		ret = -EINVAL;
+		break;
+
+	case MIXERIOCGETOUTPUTCOUNT:
+		*(unsigned *)arg = _max_actuators;
 		break;
 
 	case MIXERIOCRESET:
@@ -2816,7 +2761,7 @@ PX4IO::ioctl(file *filep, int cmd, unsigned long arg)
 
 	case MIXERIOCLOADBUF: {
 			const char *buf = (const char *)arg;
-			ret = mixer_send(buf, strlen(buf));
+			ret = mixer_send(buf, strnlen(buf, 2048));
 			break;
 		}
 
@@ -2831,7 +2776,6 @@ PX4IO::ioctl(file *filep, int cmd, unsigned long arg)
 		}
 
 		/* reboot into bootloader - arg must be PX4IO_REBOOT_BL_MAGIC */
-		usleep(1);
 		io_reg_set(PX4IO_PAGE_SETUP, PX4IO_P_SETUP_REBOOT_BL, arg);
 		// we don't expect a reply from this operation
 		ret = OK;
@@ -2847,7 +2791,7 @@ PX4IO::ioctl(file *filep, int cmd, unsigned long arg)
 			}
 
 			if (io_crc != arg) {
-				PX4_DEBUG("crc mismatch 0x%08x 0x%08lx", io_crc, arg);
+				DEVICE_DEBUG("crc mismatch 0x%08x 0x%08lx", io_crc, arg);
 				return -EINVAL;
 			}
 
@@ -2946,10 +2890,19 @@ PX4IO::write(file * /*filp*/, const char *buffer, size_t len)
 int
 PX4IO::set_update_rate(int rate)
 {
-	unsigned interval_ms = 1000 / rate;
+	int interval_ms = 1000 / rate;
 
-	_update_interval = math::constrain(interval_ms, UPDATE_INTERVAL_MIN, UPDATE_INTERVAL_MAX);
+	if (interval_ms < UPDATE_INTERVAL_MIN) {
+		interval_ms = UPDATE_INTERVAL_MIN;
+		warnx("update rate too high, limiting interval to %d ms (%d Hz).", interval_ms, 1000 / interval_ms);
+	}
 
+	if (interval_ms > 100) {
+		interval_ms = 100;
+		warnx("update rate too low, limiting to %d ms (%d Hz).", interval_ms, 1000 / interval_ms);
+	}
+
+	_update_interval = interval_ms;
 	return 0;
 }
 
@@ -2998,26 +2951,23 @@ start(int argc, char *argv[])
 
 	if (g_dev == nullptr) {
 		delete interface;
-		errx(1, "driver allocation failed");
+		errx(1, "driver alloc failed");
 	}
 
 	bool rc_handling_disabled = false;
-	bool hitl_mode = false;
 
-	/* disable RC handling and/or actuator_output publication on request */
-	for (int extra_args = 1; extra_args < argc; extra_args++) {
-		if (!strcmp(argv[extra_args], "norc")) {
+	/* disable RC handling on request */
+	if (argc > 1) {
+		if (!strcmp(argv[1], "norc")) {
+
 			rc_handling_disabled = true;
-
-		} else if (!strcmp(argv[extra_args], "hil")) {
-			hitl_mode = true;
 
 		} else {
 			warnx("unknown argument: %s", argv[1]);
 		}
 	}
 
-	if (OK != g_dev->init(rc_handling_disabled, hitl_mode)) {
+	if (OK != g_dev->init(rc_handling_disabled)) {
 		delete g_dev;
 		g_dev = nullptr;
 		errx(1, "driver init failed");
@@ -3040,7 +2990,7 @@ detect(int argc, char *argv[])
 	(void)new PX4IO(interface);
 
 	if (g_dev == nullptr) {
-		errx(1, "driver allocation failed");
+		errx(1, "driver alloc failed");
 	}
 
 	int ret = g_dev->detect();
@@ -3070,7 +3020,7 @@ checkcrc(int argc, char *argv[])
 		(void)new PX4IO(interface);
 
 		if (g_dev == nullptr) {
-			errx(1, "driver allocation failed");
+			errx(1, "driver alloc failed");
 		}
 
 	} else {
@@ -3221,7 +3171,7 @@ test(void)
 		ret = write(fd, servos, sizeof(servos));
 
 		if (ret != (int)sizeof(servos)) {
-			err(1, "error writing PWM servo data, wrote %zu got %d", sizeof(servos), ret);
+			err(1, "error writing PWM servo data, wrote %lu got %d", sizeof(servos), ret);
 		}
 
 		if (direction > 0) {
@@ -3241,7 +3191,7 @@ test(void)
 			}
 		}
 
-		px4_usleep(250);
+		usleep(250);
 
 		/* readback servo values */
 		for (unsigned i = 0; i < servo_count; i++) {
@@ -3367,7 +3317,7 @@ lockdown(int argc, char *argv[])
 					}
 				}
 
-				px4_usleep(10000);
+				usleep(10000);
 			}
 
 			if (hrt_elapsed_time(&start) > timeout) {
@@ -3398,10 +3348,6 @@ px4io_main(int argc, char *argv[])
 	/* check for sufficient number of arguments */
 	if (argc < 2) {
 		goto out;
-	}
-
-	if (!PX4_MFT_HW_SUPPORTED(PX4_MFT_PX4IO)) {
-		errx(1, "PX4IO Not Supported");
 	}
 
 	if (!strcmp(argv[1], "start")) {
@@ -3494,7 +3440,7 @@ px4io_main(int argc, char *argv[])
 
 			if (g_dev == nullptr) {
 				delete interface;
-				errx(1, "driver allocation failed");
+				errx(1, "driver alloc failed");
 			}
 		}
 

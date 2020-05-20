@@ -37,6 +37,4 @@ px4_add_module(
 		PWMSim.cpp
 	DEPENDS
 		mixer
-		mixer_module
-		output_limit
 	)

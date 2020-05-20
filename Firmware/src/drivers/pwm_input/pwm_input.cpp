@@ -41,8 +41,7 @@
  * @author: Ban Siesta <bansiesta@gmail.com>
  */
 
-#include <px4_platform_common/px4_config.h>
-#include <px4_platform_common/time.h>
+#include <px4_config.h>
 #include <nuttx/arch.h>
 #include <nuttx/irq.h>
 
@@ -94,14 +93,70 @@
 #error PWMIN defines are needed in board_config.h for this board
 #endif
 
-/* Get the timer defines */
-#define INPUT_TIMER PWMIN_TIMER
-#include "timer_registers.h"
-#define PWMIN_TIMER_BASE	TIMER_BASE
-#define PWMIN_TIMER_CLOCK	TIMER_CLOCK
-#define PWMIN_TIMER_POWER_REG	TIMER_CLOCK_POWER_REG
-#define PWMIN_TIMER_POWER_BIT	TIMER_CLOCK_POWER_BIT
-#define PWMIN_TIMER_VECTOR	TIMER_IRQ_REG
+/* PWMIN configuration */
+#if   PWMIN_TIMER == 1
+# define PWMIN_TIMER_BASE	STM32_TIM1_BASE
+# define PWMIN_TIMER_POWER_REG	STM32_RCC_APB2ENR
+# define PWMIN_TIMER_POWER_BIT	RCC_APB2ENR_TIM1EN
+# define PWMIN_TIMER_VECTOR	STM32_IRQ_TIM1CC
+# define PWMIN_TIMER_CLOCK	STM32_APB2_TIM1_CLKIN
+#elif PWMIN_TIMER == 2
+# define PWMIN_TIMER_BASE	STM32_TIM2_BASE
+# define PWMIN_TIMER_POWER_REG	STM32_RCC_APB1ENR
+# define PWMIN_TIMER_POWER_BIT	RCC_APB1ENR_TIM2EN
+# define PWMIN_TIMER_VECTOR	STM32_IRQ_TIM2
+# define PWMIN_TIMER_CLOCK	STM32_APB1_TIM2_CLKIN
+#elif PWMIN_TIMER == 3
+# define PWMIN_TIMER_BASE	STM32_TIM3_BASE
+# define PWMIN_TIMER_POWER_REG	STM32_RCC_APB1ENR
+# define PWMIN_TIMER_POWER_BIT	RCC_APB1ENR_TIM3EN
+# define PWMIN_TIMER_VECTOR	STM32_IRQ_TIM3
+# define PWMIN_TIMER_CLOCK	STM32_APB1_TIM3_CLKIN
+#elif PWMIN_TIMER == 4
+# define PWMIN_TIMER_BASE	STM32_TIM4_BASE
+# define PWMIN_TIMER_POWER_REG	STM32_RCC_APB1ENR
+# define PWMIN_TIMER_POWER_BIT	RCC_APB1ENR_TIM4EN
+# define PWMIN_TIMER_VECTOR	STM32_IRQ_TIM4
+# define PWMIN_TIMER_CLOCK	STM32_APB1_TIM4_CLKIN
+#elif PWMIN_TIMER == 5
+# define PWMIN_TIMER_BASE	STM32_TIM5_BASE
+# define PWMIN_TIMER_POWER_REG	STM32_RCC_APB1ENR
+# define PWMIN_TIMER_POWER_BIT	RCC_APB1ENR_TIM5EN
+# define PWMIN_TIMER_VECTOR	STM32_IRQ_TIM5
+# define PWMIN_TIMER_CLOCK	STM32_APB1_TIM5_CLKIN
+#elif PWMIN_TIMER == 8
+# define PWMIN_TIMER_BASE	STM32_TIM8_BASE
+# define PWMIN_TIMER_POWER_REG	STM32_RCC_APB2ENR
+# define PWMIN_TIMER_POWER_BIT	RCC_APB2ENR_TIM8EN
+# define PWMIN_TIMER_VECTOR	STM32_IRQ_TIM8CC
+# define PWMIN_TIMER_CLOCK	STM32_APB2_TIM8_CLKIN
+#elif PWMIN_TIMER == 9
+# define PWMIN_TIMER_BASE	STM32_TIM9_BASE
+# define PWMIN_TIMER_POWER_REG	STM32_RCC_APB2ENR
+# define PWMIN_TIMER_POWER_BIT	RCC_APB2ENR_TIM9EN
+# define PWMIN_TIMER_VECTOR	STM32_IRQ_TIM1BRK
+# define PWMIN_TIMER_CLOCK	STM32_APB2_TIM9_CLKIN
+#elif PWMIN_TIMER == 10
+# define PWMIN_TIMER_BASE	STM32_TIM10_BASE
+# define PWMIN_TIMER_POWER_REG	STM32_RCC_APB2ENR
+# define PWMIN_TIMER_POWER_BIT	RCC_APB2ENR_TIM10EN
+# define PWMIN_TIMER_VECTOR	STM32_IRQ_TIM1UP
+# define PWMIN_TIMER_CLOCK	STM32_APB2_TIM10_CLKIN
+#elif PWMIN_TIMER == 11
+# define PWMIN_TIMER_BASE	STM32_TIM11_BASE
+# define PWMIN_TIMER_POWER_REG	STM32_RCC_APB2ENR
+# define PWMIN_TIMER_POWER_BIT	RCC_APB2ENR_TIM11EN
+# define PWMIN_TIMER_VECTOR	STM32_IRQ_TIM1TRGCOM
+# define PWMIN_TIMER_CLOCK	STM32_APB2_TIM11_CLKIN
+#elif PWMIN_TIMER == 12
+# define PWMIN_TIMER_BASE	STM32_TIM12_BASE
+# define PWMIN_TIMER_POWER_REG	STM32_RCC_APB1ENR
+# define PWMIN_TIMER_POWER_BIT	RCC_APB1ENR_TIM12EN
+# define PWMIN_TIMER_VECTOR	STM32_IRQ_TIM8BRK
+# define PWMIN_TIMER_CLOCK	STM32_APB1_TIM12_CLKIN
+#else
+# error PWMIN_TIMER must be a value between 1 and 12
+#endif
 
 /*
  * HRT clock must be at least 1MHz
@@ -170,7 +225,7 @@
 #define TIMEOUT_POLL 300000 /* reset after no response over this time in microseconds [0.3s] */
 #define TIMEOUT_READ 200000 /* don't reset if the last read is back more than this time in microseconds [0.2s] */
 
-class PWMIN : cdev::CDev
+class PWMIN : device::CDev
 {
 public:
 	PWMIN();
@@ -216,7 +271,7 @@ static void pwmin_usage(void);
 static PWMIN *g_dev;
 
 PWMIN::PWMIN() :
-	CDev(PWMIN0_DEVICE_PATH),
+	CDev("pwmin", PWMIN0_DEVICE_PATH),
 	_error_count(0),
 	_pulses_captured(0),
 	_last_period(0),
@@ -382,6 +437,24 @@ int
 PWMIN::ioctl(struct file *filp, int cmd, unsigned long arg)
 {
 	switch (cmd) {
+	case SENSORIOCSQUEUEDEPTH: {
+			/* lower bound is mandatory, upper bound is a sanity check */
+			if ((arg < 1) || (arg > 500)) {
+				return -EINVAL;
+			}
+
+			irqstate_t flags = px4_enter_critical_section();
+
+			if (!_reports->resize(arg)) {
+				px4_leave_critical_section(flags);
+				return -ENOMEM;
+			}
+
+			px4_leave_critical_section(flags);
+
+			return OK;
+		}
+
 	case SENSORIOCRESET:
 		/* user has asked for the timer to be reset. This may
 		 * be needed if the pin was used for a different
@@ -532,7 +605,7 @@ static void pwmin_test(void)
 
 		} else {
 			/* no data, retry in 2 ms */
-			px4_usleep(2000);
+			::usleep(2000);
 		}
 	}
 

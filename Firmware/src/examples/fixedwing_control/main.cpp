@@ -49,12 +49,11 @@
 #include <drivers/drv_hrt.h>
 #include <lib/ecl/geo/geo.h>
 #include <matrix/math.hpp>
-#include <px4_platform_common/px4_config.h>
-#include <px4_platform_common/tasks.h>
+#include <px4_config.h>
+#include <px4_tasks.h>
 #include <systemlib/err.h>
 #include <parameters/param.h>
 #include <perf/perf_counter.h>
-#include <uORB/Subscription.hpp>
 #include <uORB/topics/actuator_controls.h>
 #include <uORB/topics/manual_control_setpoint.h>
 #include <uORB/topics/parameter_update.h>
@@ -102,6 +101,13 @@ int fixedwing_control_thread_main(int argc, char *argv[]);
  */
 static void usage(const char *reason);
 
+int parameters_init(struct param_handles *h);
+
+/**
+ * Update all parameters
+ *
+ */
+int parameters_update(const struct param_handles *h, struct params *p);
 
 /**
  * Control roll and pitch angle.
@@ -320,14 +326,15 @@ int fixedwing_control_thread_main(int argc, char *argv[])
 	int manual_sp_sub = orb_subscribe(ORB_ID(manual_control_setpoint));
 	int vstatus_sub = orb_subscribe(ORB_ID(vehicle_status));
 	int global_sp_sub = orb_subscribe(ORB_ID(position_setpoint_triplet));
-
-	uORB::Subscription parameter_update_sub{ORB_ID(parameter_update)};
+	int param_sub = orb_subscribe(ORB_ID(parameter_update));
 
 	/* Setup of loop */
 
-	struct pollfd fds[1] {};
-	fds[0].fd = att_sub;
+	struct pollfd fds[2] = {};
+	fds[0].fd = param_sub;
 	fds[0].events = POLLIN;
+	fds[1].fd = att_sub;
+	fds[1].events = POLLIN;
 
 	while (!thread_should_exit) {
 
@@ -341,7 +348,7 @@ int fixedwing_control_thread_main(int argc, char *argv[])
 		 * This design pattern makes the controller also agnostic of the attitude
 		 * update speed - it runs as fast as the attitude updates with minimal latency.
 		 */
-		int ret = poll(fds, 1, 500);
+		int ret = poll(fds, 2, 500);
 
 		if (ret < 0) {
 			/*
@@ -354,18 +361,18 @@ int fixedwing_control_thread_main(int argc, char *argv[])
 			/* no return value = nothing changed for 500 ms, ignore */
 		} else {
 
-			// check for parameter updates
-			if (parameter_update_sub.updated()) {
-				// clear update
-				parameter_update_s pupdate;
-				parameter_update_sub.copy(&pupdate);
+			/* only update parameters if they changed */
+			if (fds[0].revents & POLLIN) {
+				/* read from param to clear updated flag (uORB API requirement) */
+				struct parameter_update_s update;
+				orb_copy(ORB_ID(parameter_update), param_sub, &update);
 
-				// if a param update occured, re-read our parameters
+				/* if a param update occured, re-read our parameters */
 				parameters_update(&ph, &p);
 			}
 
 			/* only run controller if attitude changed */
-			if (fds[0].revents & POLLIN) {
+			if (fds[1].revents & POLLIN) {
 
 
 				/* Check if there is a new position measurement or position setpoint */
@@ -443,6 +450,7 @@ usage(const char *reason)
 	}
 
 	fprintf(stderr, "usage: ex_fixedwing_control {start|stop|status}\n\n");
+	exit(1);
 }
 
 /**
@@ -457,7 +465,6 @@ int ex_fixedwing_control_main(int argc, char *argv[])
 {
 	if (argc < 2) {
 		usage("missing command");
-		return 1;
 	}
 
 	if (!strcmp(argv[1], "start")) {
@@ -465,7 +472,7 @@ int ex_fixedwing_control_main(int argc, char *argv[])
 		if (thread_running) {
 			printf("ex_fixedwing_control already running\n");
 			/* this is not an error */
-			return 0;
+			exit(0);
 		}
 
 		thread_should_exit = false;
@@ -476,12 +483,12 @@ int ex_fixedwing_control_main(int argc, char *argv[])
 						 fixedwing_control_thread_main,
 						 (argv) ? (char *const *)&argv[2] : (char *const *)nullptr);
 		thread_running = true;
-		return 0;
+		exit(0);
 	}
 
 	if (!strcmp(argv[1], "stop")) {
 		thread_should_exit = true;
-		return 0;
+		exit(0);
 	}
 
 	if (!strcmp(argv[1], "status")) {
@@ -492,9 +499,9 @@ int ex_fixedwing_control_main(int argc, char *argv[])
 			printf("\tex_fixedwing_control not started\n");
 		}
 
-		return 0;
+		exit(0);
 	}
 
 	usage("unrecognized command");
-	return 0;
+	exit(1);
 }

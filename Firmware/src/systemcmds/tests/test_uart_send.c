@@ -1,6 +1,8 @@
 /****************************************************************************
+ * px4/sensors/test_gpio.c
  *
- *  Copyright (C) 2012-2019 PX4 Development Team. All rights reserved.
+ *  Copyright (C) 2012 PX4 Development Team. All rights reserved.
+ *            Lorenz Meier <lm@inf.ethz.ch>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -12,7 +14,7 @@
  *    notice, this list of conditions and the following disclaimer in
  *    the documentation and/or other materials provided with the
  *    distribution.
- * 3. Neither the name PX4 nor the names of its contributors may be
+ * 3. Neither the name NuttX nor the names of its contributors may be
  *    used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -31,14 +33,11 @@
  *
  ****************************************************************************/
 
-/**
- * @file test_uart_send.c
- * Tests the uart send functionality.
- *
- * @author Lorenz Meier <lorenz@px4.io>
- */
+/****************************************************************************
+ * Included Files
+ ****************************************************************************/
 
-#include <px4_platform_common/px4_config.h>
+#include <px4_config.h>
 
 #include <sys/types.h>
 
@@ -56,6 +55,39 @@
 #include <float.h>
 #include <drivers/drv_hrt.h>
 
+
+/****************************************************************************
+ * Pre-processor Definitions
+ ****************************************************************************/
+
+/****************************************************************************
+ * Private Types
+ ****************************************************************************/
+
+/****************************************************************************
+ * Private Function Prototypes
+ ****************************************************************************/
+
+/****************************************************************************
+ * Private Data
+ ****************************************************************************/
+
+/****************************************************************************
+ * Public Data
+ ****************************************************************************/
+
+/****************************************************************************
+ * Private Functions
+ ****************************************************************************/
+
+
+/****************************************************************************
+ * Public Functions
+ ****************************************************************************/
+
+/****************************************************************************
+ * Name: test_led
+ ****************************************************************************/
 
 int test_uart_send(int argc, char *argv[])
 {

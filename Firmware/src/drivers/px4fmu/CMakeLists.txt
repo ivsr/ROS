@@ -33,12 +33,13 @@
 px4_add_module(
 	MODULE drivers__px4fmu
 	MAIN fmu
+	STACK_MAIN 1200
 	COMPILE_FLAGS
 	SRCS
 		fmu.cpp
 	DEPENDS
-		arch_io_pins
+		circuit_breaker
 		mixer
-		mixer_module
-		output_limit
+		rc
+		pwm_limit
 	)

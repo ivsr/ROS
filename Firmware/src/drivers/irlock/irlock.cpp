@@ -40,16 +40,25 @@
  * Created on: Nov 12, 2014
  **/
 
+#include <fcntl.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 
+#include <board_config.h>
 #include <drivers/device/i2c.h>
 #include <drivers/device/ringbuffer.h>
+#include <drivers/drv_irlock.h>
+#include <drivers/drv_hrt.h>
 
-#include <px4_platform_common/getopt.h>
-#include <px4_platform_common/px4_work_queue/ScheduledWorkItem.hpp>
+#include <nuttx/clock.h>
+#include <nuttx/wqueue.h>
 #include <systemlib/err.h>
 
-#include <uORB/Publication.hpp>
+#include <uORB/uORB.h>
 #include <uORB/topics/irlock_report.h>
 
 /** Configuration Constants **/
@@ -76,27 +85,11 @@
 #define IRLOCK_TAN_ANG_PER_PIXEL_X	(2*IRLOCK_TAN_HALF_FOV_X/IRLOCK_RES_X)
 #define IRLOCK_TAN_ANG_PER_PIXEL_Y	(2*IRLOCK_TAN_HALF_FOV_Y/IRLOCK_RES_Y)
 
-#define IRLOCK_BASE_DEVICE_PATH	"/dev/irlock"
-#define IRLOCK0_DEVICE_PATH	"/dev/irlock0"
+#ifndef CONFIG_SCHED_WORKQUEUE
+# error This requires CONFIG_SCHED_WORKQUEUE.
+#endif
 
-#define IRLOCK_OBJECTS_MAX	5	/** up to 5 objects can be detected/reported **/
-
-struct irlock_target_s {
-	uint16_t signature;	/** target signature **/
-	float pos_x;	/** x-axis distance from center of image to center of target in units of tan(theta) **/
-	float pos_y;	/** y-axis distance from center of image to center of target in units of tan(theta) **/
-	float size_x;	/** size of target along x-axis in units of tan(theta) **/
-	float size_y;	/** size of target along y-axis in units of tan(theta) **/
-};
-
-/** irlock_s structure returned from read calls **/
-struct irlock_s {
-	uint64_t timestamp; /** microseconds since system start **/
-	uint8_t num_targets;
-	struct irlock_target_s targets[IRLOCK_OBJECTS_MAX];
-};
-
-class IRLOCK : public device::I2C, public px4::ScheduledWorkItem
+class IRLOCK : public device::I2C
 {
 public:
 	IRLOCK(int bus = IRLOCK_I2C_BUS, int address = IRLOCK_I2C_ADDRESS);
@@ -117,8 +110,11 @@ private:
 	/** stop periodic reads from sensor **/
 	void 		stop();
 
+	/** static function that is called by worker queue, arg will be pointer to instance of this class **/
+	static void	cycle_trampoline(void *arg);
+
 	/** read from device and schedule next read **/
-	void		Run() override;
+	void		cycle();
 
 	/** low level communication with sensor **/
 	int 		read_device();
@@ -129,10 +125,11 @@ private:
 	/** internal variables **/
 	ringbuffer::RingBuffer *_reports;
 	bool _sensor_ok;
+	work_s _work;
 	uint32_t _read_failures;
 
 	int _orb_class_instance;
-	uORB::Publication<irlock_report_s> _irlock_report_topic{ORB_ID(irlock_report)};
+	orb_advert_t _irlock_report_topic;
 };
 
 /** global pointer for single IRLOCK sensor **/
@@ -148,12 +145,13 @@ extern "C" __EXPORT int irlock_main(int argc, char *argv[]);
 /** constructor **/
 IRLOCK::IRLOCK(int bus, int address) :
 	I2C("irlock", IRLOCK0_DEVICE_PATH, bus, address, 400000),
-	ScheduledWorkItem(MODULE_NAME, px4::device_bus_to_wq(get_device_id())),
 	_reports(nullptr),
 	_sensor_ok(false),
 	_read_failures(0),
-	_orb_class_instance(-1)
+	_orb_class_instance(-1),
+	_irlock_report_topic(nullptr)
 {
+	memset(&_work, 0, sizeof(_work));
 }
 
 /** destructor **/
@@ -274,22 +272,32 @@ void IRLOCK::start()
 	_reports->flush();
 
 	/** start work queue cycle **/
-	ScheduleNow();
+	work_queue(HPWORK, &_work, (worker_t)&IRLOCK::cycle_trampoline, this, 1);
 }
 
 /** stop periodic reads from sensor **/
 void IRLOCK::stop()
 {
-	ScheduleClear();
+	work_cancel(HPWORK, &_work);
 }
 
-void IRLOCK::Run()
+void IRLOCK::cycle_trampoline(void *arg)
+{
+	IRLOCK *device = (IRLOCK *)arg;
+
+	/** check global irlock reference and cycle **/
+	if (g_irlock != nullptr) {
+		device->cycle();
+	}
+}
+
+void IRLOCK::cycle()
 {
 	/** ignoring failure, if we do, we will be back again right away... **/
 	read_device();
 
 	/** schedule the next cycle **/
-	ScheduleDelayed(IRLOCK_CONVERSION_INTERVAL_US);
+	work_queue(HPWORK, &_work, (worker_t)&IRLOCK::cycle_trampoline, this, USEC2TICK(IRLOCK_CONVERSION_INTERVAL_US));
 }
 
 ssize_t IRLOCK::read(struct file *filp, char *buffer, size_t buflen)
@@ -365,7 +373,8 @@ int IRLOCK::read_device()
 
 	// publish over uORB
 	if (report.num_targets > 0) {
-		irlock_report_s orb_report{};
+		struct irlock_report_s orb_report;
+
 		orb_report.timestamp = report.timestamp;
 		orb_report.signature = report.targets[0].signature;
 		orb_report.pos_x     = report.targets[0].pos_x;
@@ -373,7 +382,16 @@ int IRLOCK::read_device()
 		orb_report.size_x    = report.targets[0].size_x;
 		orb_report.size_y    = report.targets[0].size_y;
 
-		_irlock_report_topic.publish(orb_report);
+		if (_irlock_report_topic != nullptr) {
+			orb_publish(ORB_ID(irlock_report), _irlock_report_topic, &orb_report);
+
+		} else {
+			_irlock_report_topic = orb_advertise_multi(ORB_ID(irlock_report), &orb_report, &_orb_class_instance, ORB_PRIO_LOW);
+
+			if (_irlock_report_topic == nullptr) {
+				DEVICE_LOG("failed to create irlock_report object. Did you start uOrb?");
+			}
+		}
 	}
 
 	return OK;
@@ -431,28 +449,17 @@ int irlock_main(int argc, char *argv[])
 {
 	int i2cdevice = IRLOCK_I2C_BUS;
 
-	int ch;
-	int myoptind = 1;
-	const char *myoptarg = nullptr;
-
-	while ((ch = px4_getopt(argc, argv, "b:", &myoptind, &myoptarg)) != EOF) {
-		switch (ch) {
-		case 'b':
-			i2cdevice = (uint8_t)atoi(myoptarg);
-			break;
-
-		default:
-			PX4_WARN("Unknown option!");
-			return -1;
-		}
+	/** jump over start/off/etc and look at options first **/
+	if (getopt(argc, argv, "b:") != EOF) {
+		i2cdevice = (int)strtol(optarg, NULL, 0);
 	}
 
-	if (myoptind >= argc) {
+	if (optind >= argc) {
 		irlock_usage();
 		exit(1);
 	}
 
-	const char *command = argv[myoptind];
+	const char *command = argv[optind];
 
 	/** start driver **/
 	if (!strcmp(command, "start")) {

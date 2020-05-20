@@ -34,6 +34,7 @@
 px4_add_module(
 	MODULE templates__module
 	MAIN module
+	STACK_MAIN 1024
 	SRCS
 		module.cpp
 	DEPENDS

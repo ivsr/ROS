@@ -1,6 +1,8 @@
 /****************************************************************************
+ * px4/sensors/test_uart_console.c
  *
- *  Copyright (C) 2012-2019 PX4 Development Team. All rights reserved.
+ *   Copyright (C) 2012 Lorenz Meier. All rights reserved.
+ *   Authors: Lorenz Meier <lm@inf.ethz.ch>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -12,7 +14,7 @@
  *    notice, this list of conditions and the following disclaimer in
  *    the documentation and/or other materials provided with the
  *    distribution.
- * 3. Neither the name PX4 nor the names of its contributors may be
+ * 3. Neither the name NuttX nor the names of its contributors may be
  *    used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -31,16 +33,12 @@
  *
  ****************************************************************************/
 
-/**
- * @file test_uart_break.c
- * Tests the uart console.
- *
- * @author Lorenz Meier <lorenz@px4.io>
- * @author David Sidrane <david_s5@nscdg.com>
- */
+/****************************************************************************
+ * Included Files
+ ****************************************************************************/
 
-#include <px4_platform_common/px4_config.h>
-#include <px4_platform_common/tasks.h>
+#include <px4_config.h>
+#include <px4_tasks.h>
 
 #include <sys/types.h>
 
@@ -75,6 +73,7 @@ static void *receive_loop(void *arg)
 int test_uart_console(int argc, char *argv[])
 {
 	/* assuming NuttShell is on UART1 (/dev/ttyS0) */
+	//
 	int uart_usb = open("/dev/ttyACM0", O_WRONLY | O_NOCTTY);
 
 	if (uart_usb < 0) {
@@ -95,7 +94,7 @@ int test_uart_console(int argc, char *argv[])
 		write(uart_usb, sample_uart_usb, sizeof(sample_uart_usb));
 		printf(".");
 		fflush(stdout);
-		px4_sleep(1);
+		sleep(1);
 	}
 
 //	uint64_t start_time = hrt_absolute_time();

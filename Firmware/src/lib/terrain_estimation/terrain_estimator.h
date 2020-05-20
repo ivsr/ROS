@@ -60,7 +60,7 @@ class __EXPORT TerrainEstimator
 {
 public:
 	TerrainEstimator();
-	~TerrainEstimator() = default;
+	~TerrainEstimator() {}
 
 	bool is_valid() {return _terrain_valid;}
 	float get_distance_to_ground() {return -_x(0);}

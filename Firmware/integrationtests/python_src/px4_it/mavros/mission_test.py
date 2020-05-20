@@ -60,10 +60,8 @@ def get_last_log():
     try:
         log_path = os.environ['PX4_LOG_DIR']
     except KeyError:
-        try:
-            log_path = os.path.join(os.environ['ROS_HOME'], 'log')
-        except KeyError:
-            log_path = os.path.join(os.environ['HOME'], '.ros/log')
+        log_path = os.path.join(os.environ['HOME'],
+                                '.ros/rootfs/fs/microsd/log')
     last_log_dir = sorted(glob.glob(os.path.join(log_path, '*')))[-1]
     last_log = sorted(glob.glob(os.path.join(last_log_dir, '*.ulg')))[-1]
     return last_log
@@ -286,7 +284,7 @@ class MavrosMissionTest(MavrosTestCommon):
             if (waypoint.command == mavutil.mavlink.MAV_CMD_NAV_VTOL_LAND or
                     waypoint.command == mavutil.mavlink.MAV_CMD_NAV_LAND):
                 self.wait_for_landed_state(
-                    mavutil.mavlink.MAV_LANDED_STATE_ON_GROUND, 120, index)
+                    mavutil.mavlink.MAV_LANDED_STATE_ON_GROUND, 60, index)
 
         self.set_arm(False, 5)
         self.clear_wps(5)

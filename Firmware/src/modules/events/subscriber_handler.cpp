@@ -1,10 +1,9 @@
 
 #include "subscriber_handler.h"
 
-#include <px4_platform_common/log.h>
+#include <px4_log.h>
 
-namespace events
-{
+using namespace events;
 
 void SubscriberHandler::subscribe()
 {
@@ -98,5 +97,3 @@ void SubscriberHandler::check_for_updates()
 	}
 
 }
-
-} /* namespace events */

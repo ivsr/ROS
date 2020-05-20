@@ -1,5 +1,4 @@
-uint64 timestamp	# time since system start (microseconds)
-uint32 icao_address 	# ICAO address
+uint32 ICAO_address 	# ICAO address
 float64 lat 		# Latitude, expressed as degrees
 float64 lon 		# Longitude, expressed as degrees
 uint8 altitude_type	# Type from ADSB_ALTITUDE_TYPE enum
@@ -22,4 +21,4 @@ uint16 PX4_ADSB_FLAGS_VALID_CALLSIGN = 16
 uint16 PX4_ADSB_FLAGS_VALID_SQUAWK = 32
 uint16 PX4_ADSB_FLAGS_RETRANSLATE = 256
 
-uint8 ORB_QUEUE_LENGTH = 10
+uint32 ORB_QUEUE_LENGTH = 10

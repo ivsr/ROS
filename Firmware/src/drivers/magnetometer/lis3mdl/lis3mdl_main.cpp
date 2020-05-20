@@ -38,7 +38,7 @@
  */
 
 #include "lis3mdl_main.h"
-#include <px4_platform_common/getopt.h>
+#include <px4_getopt.h>
 
 /**
  * Driver 'main' command.
@@ -46,18 +46,17 @@
 extern "C" __EXPORT int lis3mdl_main(int argc, char *argv[]);
 
 int
-lis3mdl::calibrate(struct lis3mdl_bus_option &bus)
+lis3mdl::calibrate(LIS3MDL_BUS bus_id)
 {
 	int ret;
+	struct lis3mdl_bus_option &bus = find_bus(bus_id);
 	const char *path = bus.devpath;
-
-	PX4_INFO("running on bus: %u (%s)", (unsigned)bus.bus_id, bus.devpath);
 
 	int fd = open(path, O_RDONLY);
 
 	if (fd < 0) {
 		PX4_WARN("%s open failed (try 'lis3mdl start' if the driver is not running", path);
-		return PX4_ERROR;
+		return 1;
 	}
 
 	if ((ret = ioctl(fd, MAGIOCCALIBRATE, fd)) != OK) {
@@ -70,44 +69,55 @@ lis3mdl::calibrate(struct lis3mdl_bus_option &bus)
 }
 
 int
-lis3mdl::info(struct lis3mdl_bus_option &bus)
+lis3mdl::info(LIS3MDL_BUS bus_id)
 {
-	PX4_INFO("running on bus: %u (%s)", (unsigned)bus.bus_id, bus.devpath);
+	struct lis3mdl_bus_option &bus = find_bus(bus_id);
+
+	PX4_WARN("running on bus: %u (%s)\n", (unsigned)bus.bus_id, bus.devpath);
 	bus.dev->print_info();
-	return PX4_OK;
+	return 1;
 }
 
-int
-lis3mdl::init(struct lis3mdl_bus_option &bus)
+bool
+lis3mdl::init(LIS3MDL_BUS bus_id)
 {
+	struct lis3mdl_bus_option &bus = find_bus(bus_id);
 	const char *path = bus.devpath;
 
 	int fd = open(path, O_RDONLY);
 
 	if (fd < 0) {
-		return PX4_ERROR;
+		return false;
 	}
 
 	if (ioctl(fd, SENSORIOCSPOLLRATE, SENSOR_POLLRATE_DEFAULT) < 0) {
 		close(fd);
 		errx(1, "Failed to setup poll rate");
-		return PX4_ERROR;
+		return false;
 
 	} else {
 		PX4_INFO("Poll rate set to max (80hz)");
 	}
 
+	/* Set to 4 Gauss */
+	if (ioctl(fd, MAGIOCSRANGE, 4) != OK) {
+		PX4_WARN("FAILED: MAGIOCSRANGE 4 Gauss");
+
+	} else {
+		PX4_INFO("Set mag range to 4 Gauss");
+	}
+
 	close(fd);
 
-	return PX4_OK;
+	return true;
 }
 
-int
+bool
 lis3mdl::start_bus(struct lis3mdl_bus_option &bus, Rotation rotation)
 {
 	if (bus.dev != nullptr) {
 		errx(1, "bus option already started");
-		return PX4_ERROR;
+		return false;
 	}
 
 	device::Device *interface = bus.interface_constructor(bus.busnum);
@@ -115,7 +125,7 @@ lis3mdl::start_bus(struct lis3mdl_bus_option &bus, Rotation rotation)
 	if (interface->init() != OK) {
 		delete interface;
 		warnx("no device on bus %u", (unsigned)bus.bus_id);
-		return PX4_ERROR;
+		return false;
 	}
 
 	bus.dev = new LIS3MDL(interface, bus.devpath, rotation);
@@ -124,54 +134,66 @@ lis3mdl::start_bus(struct lis3mdl_bus_option &bus, Rotation rotation)
 	    bus.dev->init() != OK) {
 		delete bus.dev;
 		bus.dev = NULL;
-		return PX4_ERROR;
+		return false;
 	}
 
-	return PX4_OK;
+	return true;
 }
 
 int
-lis3mdl::start(struct lis3mdl_bus_option &bus, Rotation rotation)
+lis3mdl::start(LIS3MDL_BUS bus_id, Rotation rotation)
 {
-	if (bus.dev == NULL) {
-		return start_bus(bus, rotation);
+	bool started = false;
 
-	} else {
-		// this device is already started
-		return PX4_ERROR;
+	for (unsigned i = 0; i < NUM_BUS_OPTIONS; i++) {
+		if (bus_id == LIS3MDL_BUS_ALL && bus_options[i].dev != NULL) {
+			// this device is already started
+			continue;
+		}
+
+		if (bus_id != LIS3MDL_BUS_ALL && bus_options[i].bus_id != bus_id) {
+			// not the one that is asked for
+			continue;
+		}
+
+		started |= start_bus(bus_options[i], rotation);
+		//init(bus_id);
 	}
+
+	return started;
 }
 
 int
-lis3mdl::stop(struct lis3mdl_bus_option &bus)
+lis3mdl::stop()
 {
-	if (bus.dev != NULL) {
-		bus.dev->stop();
-		delete bus.dev;
-		bus.dev = nullptr;
-		return PX4_OK;
+	bool stopped = false;
 
-	} else {
-		// this device is already stopped
-		return PX4_ERROR;
+	for (unsigned i = 0; i < NUM_BUS_OPTIONS; i++) {
+		if (bus_options[i].dev != nullptr) {
+			bus_options[i].dev->stop();
+			delete bus_options[i].dev;
+			bus_options[i].dev = nullptr;
+			stopped = true;
+		}
 	}
+
+	return !stopped;
 }
 
-int
-lis3mdl::test(struct lis3mdl_bus_option &bus)
+bool
+lis3mdl::test(LIS3MDL_BUS bus_id)
 {
+	struct lis3mdl_bus_option &bus = find_bus(bus_id);
 	struct mag_report report;
 	ssize_t sz;
 	int ret;
 	const char *path = bus.devpath;
 
-	PX4_INFO("running on bus: %u (%s)", (unsigned)bus.bus_id, bus.devpath);
-
 	int fd = open(path, O_RDONLY);
 
 	if (fd < 0) {
 		PX4_WARN("%s open failed (try 'lis3mdl start')", path);
-		return PX4_ERROR;
+		return 1;
 	}
 
 	/* do a simple demand read */
@@ -179,7 +201,7 @@ lis3mdl::test(struct lis3mdl_bus_option &bus)
 
 	if (sz != sizeof(report)) {
 		PX4_WARN("immediate read failed");
-		return PX4_ERROR;
+		return 1;
 	}
 
 	print_message(report);
@@ -187,13 +209,19 @@ lis3mdl::test(struct lis3mdl_bus_option &bus)
 	/* check if mag is onboard or external */
 	if (ioctl(fd, MAGIOCGEXTERNAL, 0) < 0) {
 		PX4_WARN("failed to get if mag is onboard or external");
-		return PX4_ERROR;
+		return 1;
+	}
+
+	/* set the queue depth to 5 */
+	if (ioctl(fd, SENSORIOCSQUEUEDEPTH, 10) != OK) {
+		PX4_WARN("failed to set queue depth");
+		return 1;
 	}
 
 	/* start the sensor polling at 2Hz */
 	if (ioctl(fd, SENSORIOCSPOLLRATE, 2) != OK) {
 		PX4_WARN("failed to set 2Hz poll rate");
-		return PX4_ERROR;
+		return 1;
 	}
 
 	struct pollfd fds;
@@ -208,7 +236,7 @@ lis3mdl::test(struct lis3mdl_bus_option &bus)
 
 		if (ret != 1) {
 			PX4_WARN("timed out waiting for sensor data");
-			return PX4_ERROR;
+			return 1;
 		}
 
 		/* now go get it */
@@ -216,41 +244,40 @@ lis3mdl::test(struct lis3mdl_bus_option &bus)
 
 		if (sz != sizeof(report)) {
 			PX4_WARN("periodic read failed");
-			return PX4_ERROR;
+			return 1;
 		}
 
 		print_message(report);
 	}
 
 	PX4_INFO("PASS");
-	return PX4_OK;
+	return 1;
 }
 
-int
-lis3mdl::reset(struct lis3mdl_bus_option &bus)
+bool
+lis3mdl::reset(LIS3MDL_BUS bus_id)
 {
+	struct lis3mdl_bus_option &bus = find_bus(bus_id);
 	const char *path = bus.devpath;
-
-	PX4_INFO("running on bus: %u (%s)", (unsigned)bus.bus_id, bus.devpath);
 
 	int fd = open(path, O_RDONLY);
 
 	if (fd < 0) {
 		PX4_WARN("open failed ");
-		return PX4_ERROR;
+		return 1;
 	}
 
 	if (ioctl(fd, SENSORIOCRESET, 0) < 0) {
 		PX4_WARN("driver reset failed");
-		return PX4_ERROR;
+		return 1;
 	}
 
 	if (ioctl(fd, SENSORIOCSPOLLRATE, SENSOR_POLLRATE_DEFAULT) < 0) {
 		PX4_WARN("driver poll restart failed");
-		return PX4_ERROR;
+		return 1;
 	}
 
-	return PX4_OK;
+	return 0;
 }
 
 void
@@ -261,7 +288,6 @@ lis3mdl::usage()
 	PX4_WARN("    -R rotation");
 	PX4_WARN("    -C calibrate on start");
 	PX4_WARN("    -X only external bus");
-	PX4_WARN("    -S only spi bus");
 #if (PX4_I2C_BUS_ONBOARD || PX4_SPIDEV_LIS)
 	PX4_WARN("    -I only internal bus");
 #endif
@@ -304,126 +330,84 @@ lis3mdl_main(int argc, char *argv[])
 
 		default:
 			lis3mdl::usage();
-			return PX4_ERROR;
+			return 0;
 		}
 	}
 
 	if (myoptind >= argc) {
 		lis3mdl::usage();
-		return PX4_ERROR;
+		return -1;
 	}
 
 	const char *verb = argv[myoptind];
-	int ret;
-	bool dev_found = false;
-	bool cmd_found = false;
 
+	// Start/load the driver
 	if (!strcmp(verb, "start")) {
-		// Start/load the driver
 
-		cmd_found = true;
-		ret = 1; // default: failed, will be set to success if one start succeeds
-
-		for (unsigned i = 0; i < NUM_BUS_OPTIONS; i++) {
-			if (bus_id != LIS3MDL_BUS_ALL && bus_id != lis3mdl::bus_options[i].bus_id) {
-				// not the one that is asked for
-				continue;
-			}
-
-			dev_found = true;
-
-			// Start/load the driver
-			if (lis3mdl::start(lis3mdl::bus_options[i], rotation) == OK) {
-				if (calibrate) {
-					if (lis3mdl::calibrate(lis3mdl::bus_options[i]) != OK) {
-						PX4_WARN("calibration failed");
-						lis3mdl::stop(lis3mdl::bus_options[i]); //Stop, failed
-
-					} else {
-						PX4_INFO("calibration successful");
-						lis3mdl::init(lis3mdl::bus_options[i]);
-						ret = 0; // one succeed
-					}
-
-				} else {
-					lis3mdl::init(lis3mdl::bus_options[i]);
-					ret = 0; // one succeed
-				}
-			}
-		}
-
-	} else {
-		// Other commands
-
-		ret = 0; // default: success, will be set to failed if one action fails
-
-		for (unsigned i = 0; i < NUM_BUS_OPTIONS; i++) {
-			if (bus_id != LIS3MDL_BUS_ALL && bus_id != lis3mdl::bus_options[i].bus_id) {
-				// not the one that is asked for
-				continue;
-			}
-
-			if (lis3mdl::bus_options[i].dev == NULL) {
-				if (bus_id != LIS3MDL_BUS_ALL) {
-					PX4_ERR("bus %u not started", (unsigned)bus_id);
-					return PX4_ERROR;
-
-				} else {
-					continue;
-				}
-			}
-
-			dev_found = true;
-
-			// Stop the driver
-			if (!strcmp(verb, "stop")) {
-				cmd_found = true;
-				ret |= lis3mdl::stop(lis3mdl::bus_options[i]);
-			}
-
-			// Test the driver/device
-			if (!strcmp(verb, "test")) {
-				cmd_found = true;
-				ret |= lis3mdl::test(lis3mdl::bus_options[i]);
-			}
-
-			// Reset the driver
-			if (!strcmp(verb, "reset")) {
-				cmd_found = true;
-				ret |= lis3mdl::reset(lis3mdl::bus_options[i]);
-			}
-
-			// Print driver information
-			if (!strcmp(verb, "info") ||
-			    !strcmp(verb, "status")) {
-				cmd_found = true;
-				ret |= lis3mdl::info(lis3mdl::bus_options[i]);
-			}
-
-			// Autocalibrate the scaling
-			if (!strcmp(verb, "calibrate")) {
-				cmd_found = true;
-
-				if (lis3mdl::calibrate(lis3mdl::bus_options[i]) == OK) {
-					PX4_INFO("calibration successful");
-
-				} else {
+		if (lis3mdl::start(bus_id, rotation)) {
+			if (calibrate) {
+				if (OK != lis3mdl::calibrate(bus_id)) {
 					PX4_WARN("calibration failed");
-					ret = 1;
+					return 1;
 				}
 			}
+
+			lis3mdl::init(bus_id);
+
+			return 0;
+
+		} else {
+			return 1;
 		}
 	}
 
-	if (!dev_found) {
-		PX4_WARN("no device found, please start driver first");
-		return PX4_ERROR;
-
-	} else if (!cmd_found) {
-		PX4_WARN("unrecognized command, try 'start', 'test', 'reset', 'calibrate' 'or 'info'");
-		return PX4_ERROR;
-
-	} else {
-		return ret;
+	// Stop the driver
+	if (!strcmp(verb, "stop")) {
+		return lis3mdl::stop();
 	}
+
+	// Test the driver/device
+	if (!strcmp(verb, "test")) {
+		return lis3mdl::test(bus_id);
+	}
+
+	// Reset the driver
+	if (!strcmp(verb, "reset")) {
+		return lis3mdl::reset(bus_id);
+	}
+
+	// Print driver information
+	if (!strcmp(verb, "info") ||
+	    !strcmp(verb, "status")) {
+		return lis3mdl::info(bus_id);
+	}
+
+	// Autocalibrate the scaling
+	if (!strcmp(verb, "calibrate")) {
+		if (lis3mdl::calibrate(bus_id) == 0) {
+			PX4_INFO("calibration successful");
+			return 0;
+
+		} else {
+			PX4_INFO("calibration failed");
+			return 1;
+		}
+
+	}
+
+	PX4_INFO("unrecognized command, try 'start', 'test', 'reset', 'calibrate' 'or 'info'");
+	return 1;
+}
+
+struct
+lis3mdl::lis3mdl_bus_option &lis3mdl::find_bus(LIS3MDL_BUS bus_id)
+{
+	for (unsigned i = 0; i < NUM_BUS_OPTIONS; i++) {
+		if ((bus_id == LIS3MDL_BUS_ALL ||
+		     bus_id == bus_options[i].bus_id) && bus_options[i].dev != NULL) {
+			return bus_options[i];
+		}
+	}
+
+	errx(1, "bus %u not started", (unsigned)bus_id);
 }

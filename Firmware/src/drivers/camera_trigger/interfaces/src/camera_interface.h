@@ -5,7 +5,7 @@
 #pragma once
 
 #include <parameters/param.h>
-#include <px4_platform_common/log.h>
+#include <px4_log.h>
 
 #define arraySize(a) (sizeof((a))/sizeof(((a)[0])))
 
@@ -21,7 +21,7 @@ public:
 	/**
 	 * Destructor.
 	 */
-	virtual ~CameraInterface() = default;
+	virtual ~CameraInterface();
 
 	/**
 	 * trigger the camera

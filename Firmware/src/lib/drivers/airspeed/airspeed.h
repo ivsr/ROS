@@ -37,17 +37,17 @@
 #include <drivers/device/i2c.h>
 #include <drivers/drv_airspeed.h>
 #include <drivers/drv_hrt.h>
-#include <px4_platform_common/px4_config.h>
-#include <px4_platform_common/defines.h>
+#include <px4_config.h>
+#include <px4_defines.h>
+#include <px4_workqueue.h>
 #include <perf/perf_counter.h>
 #include <uORB/topics/differential_pressure.h>
-#include <uORB/PublicationMulti.hpp>
-#include <px4_platform_common/px4_work_queue/ScheduledWorkItem.hpp>
+#include <uORB/uORB.h>
 
 /* Default I2C bus */
 static constexpr uint8_t PX4_I2C_BUS_DEFAULT = PX4_I2C_BUS_EXPANSION;
 
-class __EXPORT Airspeed : public device::I2C, public px4::ScheduledWorkItem
+class __EXPORT Airspeed : public device::I2C
 {
 public:
 	Airspeed(int bus, int address, unsigned conversion_interval, const char *path);
@@ -69,17 +69,17 @@ protected:
 	* Perform a poll cycle; collect from the previous measurement
 	* and start a new one.
 	*/
-	virtual void	Run() = 0;
+	virtual void	cycle() = 0;
 	virtual int	measure() = 0;
 	virtual int	collect() = 0;
 
+	work_s			_work;
 	bool			_sensor_ok;
-	int				_measure_interval;
+	uint32_t		_measure_ticks;
 	bool			_collect_phase;
 	float			_diff_pres_offset;
 
-	uORB::PublicationMulti<differential_pressure_s>	_airspeed_pub{ORB_ID(differential_pressure)};
-
+	orb_advert_t		_airspeed_pub;
 	int			_airspeed_orb_class_instance;
 
 	int			_class_instance;
@@ -101,6 +101,14 @@ protected:
 	* Stop the automatic measurement state machine.
 	*/
 	void	stop();
+
+	/**
+	* Static trampoline from the workq context; because we don't have a
+	* generic workq wrapper yet.
+	*
+	* @param arg		Instance pointer for the driver that is polling.
+	*/
+	static void	cycle_trampoline(void *arg);
 
 	/**
 	* add a new report to the reports queue

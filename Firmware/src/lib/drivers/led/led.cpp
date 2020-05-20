@@ -37,8 +37,8 @@
  * LED driver to control the onboard LED(s) via ioctl interface.
  */
 
-#include <px4_platform_common/px4_config.h>
-#include <lib/cdev/CDev.hpp>
+#include <px4_config.h>
+#include <drivers/device/device.h>
 #include <drivers/drv_board_led.h>
 #include <stdio.h>
 
@@ -56,36 +56,36 @@ extern void led_off(int led);
 extern void led_toggle(int led);
 __END_DECLS
 
-class LED : cdev::CDev
+class LED : device::CDev
 {
 public:
 	LED();
-	~LED() override = default;
+	virtual ~LED();
 
-	int	init() override;
-	int	ioctl(cdev::file_t *filp, int cmd, unsigned long arg) override;
+	virtual int		init();
+	virtual int		ioctl(device::file_t *filp, int cmd, unsigned long arg);
 };
 
-LED::LED() : CDev(LED0_DEVICE_PATH)
+LED::LED() : CDev("led", LED0_DEVICE_PATH)
 {
 	// force immediate init/device registration
 	init();
 }
 
+LED::~LED() = default;
+
 int
 LED::init()
 {
-	PX4_DEBUG("LED::init");
-
+	DEVICE_DEBUG("LED::init");
 	CDev::init();
-
 	led_init();
 
 	return 0;
 }
 
 int
-LED::ioctl(cdev::file_t *filp, int cmd, unsigned long arg)
+LED::ioctl(device::file_t *filp, int cmd, unsigned long arg)
 {
 	int result = OK;
 

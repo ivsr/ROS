@@ -1,16 +1,14 @@
-#!/usr/bin/env bash
-
-set -e
+#! /bin/bash
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR/jMAVSim"
 
-tcp_port=4560
+udp_port=14560
 extra_args=
 baudrate=921600
 device=
 ip="127.0.0.1"
-while getopts ":b:d:p:qsr:f:i:l" opt; do
+while getopts ":b:d:p:qr:i:" opt; do
 	case $opt in
 		b)
 			baudrate=$OPTARG
@@ -22,19 +20,13 @@ while getopts ":b:d:p:qsr:f:i:l" opt; do
 			ip="$OPTARG"
 			;;
 		p)
-			tcp_port=$OPTARG
+			udp_port=$OPTARG
 			;;
 		q)
 			extra_args="$extra_args -qgc"
 			;;
-		s)
-			extra_args="$extra_args -sdk"
-			;;
 		r)
 			extra_args="$extra_args -r $OPTARG"
-			;;
-		l)
-			extra_args="$extra_args -lockstep"
 			;;
 		\?)
 			echo "Invalid option: -$OPTARG" >&2
@@ -44,25 +36,9 @@ while getopts ":b:d:p:qsr:f:i:l" opt; do
 done
 
 if [ "$device" == "" ]; then
-	device="-tcp $ip:$tcp_port"
+	device="-udp $ip:$udp_port"
 else
 	device="-serial $device $baudrate"
-fi
-
-if [ "$HEADLESS" = "1" ]; then
-    extra_args="$extra_args -no-gui"
-fi
-
-# jMAVSim crashes with Java 9 on macOS, therefore we need to use Java 8
-if [ "$(uname)" == "Darwin" ]; then
-    bold=$(tput bold)
-    normal=$(tput sgr0)
-    if ! /usr/libexec/java_home -V 2>&1 | grep --quiet "Java SE 8" ; then
-        echo "${bold}You need to have Java 8 installed for macOS, for more info, see:${normal}"
-        echo "${bold}https://github.com/PX4/jMAVSim/issues/81${normal}"
-        exit 1
-    fi
-    export JAVA_HOME=`/usr/libexec/java_home -v 1.8`
 fi
 
 ant create_run_jar copy_res

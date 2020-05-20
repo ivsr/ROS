@@ -40,9 +40,9 @@
  * @author Maelok Dong
  */
 
-#include <px4_platform_common/px4_config.h>
-#include <px4_platform_common/defines.h>
-#include <px4_platform_common/getopt.h>
+#include <px4_config.h>
+#include <px4_defines.h>
+#include <px4_getopt.h>
 
 #include <sys/types.h>
 #include <stdint.h>
@@ -58,6 +58,7 @@
 #include <unistd.h>
 
 #include <nuttx/arch.h>
+#include <nuttx/wqueue.h>
 #include <nuttx/clock.h>
 
 #include <board_config.h>
@@ -74,9 +75,8 @@
 #include <uORB/uORB.h>
 
 #include <float.h>
+#include <getopt.h>
 #include <lib/conversion/rotation.h>
-
-#include <px4_platform_common/px4_work_queue/ScheduledWorkItem.hpp>
 
 /*
  * IST8310 internal constants and data structures.
@@ -183,7 +183,11 @@ enum IST8310_BUS {
 	IST8310_BUS_I2C_INTERNAL  = 5,
 };
 
-class IST8310 : public device::I2C, public px4::ScheduledWorkItem
+#ifndef CONFIG_SCHED_WORKQUEUE
+# error This requires CONFIG_SCHED_WORKQUEUE.
+#endif
+
+class IST8310 : public device::I2C
 {
 public:
 	IST8310(int bus_number, int address, const char *path, enum Rotation rotation);
@@ -203,19 +207,17 @@ protected:
 	virtual int probe();
 
 private:
+	work_s          _work;
+	unsigned        _measure_ticks;
 
-	unsigned        _measure_interval{0};
+	ringbuffer::RingBuffer  *_reports;
+	struct mag_calibration_s    _scale;
+	float           _range_scale;
+	bool        _collect_phase;
+	int         _class_instance;
+	int         _orb_class_instance;
 
-	ringbuffer::RingBuffer  *_reports{nullptr};
-
-	struct mag_calibration_s	_scale {};
-	float				_range_scale{0.003f}; /* default range scale from counts to gauss */
-
-	bool        _collect_phase{false};
-	int         _class_instance{-1};
-	int         _orb_class_instance{-1};
-
-	orb_advert_t        _mag_topic{nullptr};
+	orb_advert_t        _mag_topic;
 
 	perf_counter_t      _sample_perf;
 	perf_counter_t      _comms_errors;
@@ -223,14 +225,16 @@ private:
 	perf_counter_t      _conf_errors;
 
 	/* status reporting */
-	bool			_sensor_ok{false};		/**< sensor was found and reports ok */
-	bool			_calibrated{false};		/**< the calibration is valid */
+	bool            _sensor_ok;         /**< sensor was found and reports ok */
+	bool            _calibrated;        /**< the calibration is valid */
+	bool			_ctl_reg_mismatch;	/**< control register value mismatch after checking */
+
 	enum Rotation       _rotation;
 
-	sensor_mag_s   _last_report{};           /**< used for info() */
+	struct mag_report   _last_report;           /**< used for info() */
 
-	uint8_t 		_ctl3_reg{0};
-	uint8_t			_ctl4_reg{0};
+	uint8_t 		_ctl3_reg;
+	uint8_t			_ctl4_reg;
 
 	/**
 	 * Initialise the automatic measurement state machine and start it.
@@ -283,7 +287,15 @@ private:
 	 * and measurement to provide the most recent measurement possible
 	 * at the next interval.
 	 */
-	void            Run() override;
+	void            cycle();
+
+	/**
+	 * Static trampoline from the workq context; because we don't have a
+	 * generic workq wrapper yet.
+	 *
+	 * @param arg       Instance pointer for the driver that is polling.
+	 */
+	static void     cycle_trampoline(void *arg);
 
 	/**
 	 * Write a register.
@@ -344,6 +356,13 @@ private:
 	float       meas_to_float(uint8_t in[2]);
 
 	/**
+	 * Check the current calibration and update device status
+	 *
+	 * @return 0 if calibration is ok, 1 else
+	 */
+	int         check_calibration();
+
+	/**
 	* Check the current scale calibration
 	*
 	* @return 0 if scale calibration is ok, 1 else
@@ -377,14 +396,31 @@ extern "C" __EXPORT int ist8310_main(int argc, char *argv[]);
 
 IST8310::IST8310(int bus_number, int address, const char *path, enum Rotation rotation) :
 	I2C("IST8310", path, bus_number, address, IST8310_DEFAULT_BUS_SPEED),
-	ScheduledWorkItem(MODULE_NAME, px4::device_bus_to_wq(get_device_id())),
+	_work{},
+	_measure_ticks(0),
+	_reports(nullptr),
+	_scale{},
+	_range_scale(0.003), /* default range scale from counts to gauss */
+	_collect_phase(false),
+	_class_instance(-1),
+	_orb_class_instance(-1),
+	_mag_topic(nullptr),
 	_sample_perf(perf_alloc(PC_ELAPSED, "ist8310_read")),
 	_comms_errors(perf_alloc(PC_COUNT, "ist8310_com_err")),
 	_range_errors(perf_alloc(PC_COUNT, "ist8310_rng_err")),
 	_conf_errors(perf_alloc(PC_COUNT, "ist8310_conf_err")),
-	_rotation(rotation)
+	_sensor_ok(false),
+	_calibrated(false),
+	_ctl_reg_mismatch(false),
+	_rotation(rotation),
+	_last_report{0},
+	_ctl3_reg(0),
+	_ctl4_reg(0)
 {
 	_device_id.devid_s.devtype = DRV_MAG_DEVTYPE_IST8310;
+
+	// enable debug() calls
+	_debug_enabled = false;
 
 	// default scaling
 	_scale.x_offset = 0;
@@ -393,6 +429,9 @@ IST8310::IST8310(int bus_number, int address, const char *path, enum Rotation ro
 	_scale.y_scale = 1.0f;
 	_scale.z_offset = 0;
 	_scale.z_scale = 1.0f;
+
+	// work_cancel in the dtor will explode if we don't do this...
+	memset(&_work, 0, sizeof(_work));
 }
 
 IST8310::~IST8310()
@@ -493,6 +532,8 @@ void IST8310::check_conf(void)
 		if (OK != ret) {
 			perf_count(_comms_errors);
 		}
+
+		_ctl_reg_mismatch = true;
 	}
 
 	ret = read_reg(ADDR_CTRL4, ctrl_reg_in);
@@ -509,7 +550,11 @@ void IST8310::check_conf(void)
 		if (OK != ret) {
 			perf_count(_comms_errors);
 		}
+
+		_ctl_reg_mismatch = true;
 	}
+
+	_ctl_reg_mismatch = false;
 }
 
 ssize_t
@@ -525,7 +570,7 @@ IST8310::read(struct file *filp, char *buffer, size_t buflen)
 	}
 
 	/* if automatic measurement is enabled */
-	if (_measure_interval > 0) {
+	if (_measure_ticks > 0) {
 		/*
 		 * While there is space in the caller's buffer, and reports, copy them.
 		 * Note that we may be pre-empted by the workq thread while we are doing this;
@@ -577,17 +622,27 @@ IST8310::ioctl(struct file *filp, int cmd, unsigned long arg)
 	case SENSORIOCSPOLLRATE: {
 			switch (arg) {
 
+			/* switching to manual polling */
+			case SENSOR_POLLRATE_MANUAL:
+				stop();
+				_measure_ticks = 0;
+				return OK;
+
+			/* external signalling (DRDY) not supported */
+			case SENSOR_POLLRATE_EXTERNAL:
+
 			/* zero would be bad */
 			case 0:
 				return -EINVAL;
 
-			/* set default polling rate */
+			/* set default/max polling rate */
+			case SENSOR_POLLRATE_MAX:
 			case SENSOR_POLLRATE_DEFAULT: {
 					/* do we need to start internal polling? */
-					bool want_start = (_measure_interval == 0);
+					bool want_start = (_measure_ticks == 0);
 
 					/* set interval for next measurement to minimum legal value */
-					_measure_interval = IST8310_CONVERSION_INTERVAL;
+					_measure_ticks = USEC2TICK(IST8310_CONVERSION_INTERVAL);
 
 					/* if we need to start the poll state machine, do it */
 					if (want_start) {
@@ -600,18 +655,18 @@ IST8310::ioctl(struct file *filp, int cmd, unsigned long arg)
 			/* adjust to a legal polling interval in Hz */
 			default: {
 					/* do we need to start internal polling? */
-					bool want_start = (_measure_interval == 0);
+					bool want_start = (_measure_ticks == 0);
 
 					/* convert hz to tick interval via microseconds */
-					unsigned interval = (1000000 / arg);
+					unsigned ticks = USEC2TICK(1000000 / arg);
 
 					/* check against maximum rate */
-					if (interval < IST8310_CONVERSION_INTERVAL) {
+					if (ticks < USEC2TICK(IST8310_CONVERSION_INTERVAL)) {
 						return -EINVAL;
 					}
 
 					/* update interval for next measurement */
-					_measure_interval = interval;
+					_measure_ticks = ticks;
 
 					/* if we need to start the poll state machine, do it */
 					if (want_start) {
@@ -623,8 +678,47 @@ IST8310::ioctl(struct file *filp, int cmd, unsigned long arg)
 			}
 		}
 
+	case SENSORIOCGPOLLRATE:
+		if (_measure_ticks == 0) {
+			return SENSOR_POLLRATE_MANUAL;
+		}
+
+		return 1000000 / TICK2USEC(_measure_ticks);
+
+	case SENSORIOCSQUEUEDEPTH: {
+			/* lower bound is mandatory, upper bound is a sanity check */
+			if ((arg < 1) || (arg > 100)) {
+				return -EINVAL;
+			}
+
+			irqstate_t flags = px4_enter_critical_section();
+
+			if (!_reports->resize(arg)) {
+				px4_leave_critical_section(flags);
+				return -ENOMEM;
+			}
+
+			px4_leave_critical_section(flags);
+
+			return OK;
+		}
+
 	case SENSORIOCRESET:
 		return reset();
+
+	case MAGIOCSSAMPLERATE:
+		/* same as pollrate because device is in single measurement mode*/
+		return ioctl(filp, SENSORIOCSPOLLRATE, arg);
+
+	case MAGIOCGSAMPLERATE:
+		/* same as pollrate because device is in single measurement mode*/
+		return 1000000 / TICK2USEC(_measure_ticks);
+
+	case MAGIOCSRANGE:
+		return OK;
+
+	case MAGIOCGRANGE:
+		return 0;
 
 	case MAGIOCEXSTRAP:
 		return set_selftest(arg);
@@ -632,6 +726,8 @@ IST8310::ioctl(struct file *filp, int cmd, unsigned long arg)
 	case MAGIOCSSCALE:
 		/* set new scale factors */
 		memcpy(&_scale, (struct mag_calibration_s *)arg, sizeof(_scale));
+		/* check calibration, but not actually return an error */
+		(void)check_calibration();
 		return 0;
 
 	case MAGIOCGSCALE:
@@ -642,7 +738,11 @@ IST8310::ioctl(struct file *filp, int cmd, unsigned long arg)
 	case MAGIOCCALIBRATE:
 		return calibrate(filp, arg);
 
+	case MAGIOCSELFTEST:
+		return check_calibration();
+
 	case MAGIOCGEXTERNAL:
+		DEVICE_DEBUG("MAGIOCGEXTERNAL in main driver");
 		return external();
 
 	default:
@@ -659,13 +759,13 @@ IST8310::start()
 	_reports->flush();
 
 	/* schedule a cycle to start things */
-	ScheduleNow();
+	work_queue(HPWORK, &_work, (worker_t)&IST8310::cycle_trampoline, this, 1);
 }
 
 void
 IST8310::stop()
 {
-	ScheduleClear();
+	work_cancel(HPWORK, &_work);
 }
 
 int
@@ -683,6 +783,14 @@ IST8310::reset()
 	write_reg(ADDR_CTRL4, _ctl4_reg);
 
 	return OK;
+}
+
+void
+IST8310::cycle_trampoline(void *arg)
+{
+	IST8310 *dev = (IST8310 *)arg;
+
+	dev->cycle();
 }
 
 int
@@ -708,7 +816,7 @@ IST8310::probe()
 }
 
 void
-IST8310::Run()
+IST8310::cycle()
 {
 	/* collection phase? */
 	if (_collect_phase) {
@@ -727,10 +835,14 @@ IST8310::Run()
 		/*
 		 * Is there a collect->measure gap?
 		 */
-		if (_measure_interval > IST8310_CONVERSION_INTERVAL) {
+		if (_measure_ticks > USEC2TICK(IST8310_CONVERSION_INTERVAL)) {
 
 			/* schedule a fresh cycle call when we are ready to measure again */
-			ScheduleDelayed(_measure_interval - IST8310_CONVERSION_INTERVAL);
+			work_queue(HPWORK,
+				   &_work,
+				   (worker_t)&IST8310::cycle_trampoline,
+				   this,
+				   _measure_ticks - USEC2TICK(IST8310_CONVERSION_INTERVAL));
 
 			return;
 		}
@@ -745,16 +857,22 @@ IST8310::Run()
 	_collect_phase = true;
 
 	/* schedule a fresh cycle call when the measurement is done */
-	ScheduleDelayed(IST8310_CONVERSION_INTERVAL);
+	work_queue(HPWORK,
+		   &_work,
+		   (worker_t)&IST8310::cycle_trampoline,
+		   this,
+		   USEC2TICK(IST8310_CONVERSION_INTERVAL));
 }
 
 int
 IST8310::measure()
 {
+	int ret;
+
 	/*
 	 * Send the command to begin a measurement.
 	 */
-	int ret = write_reg(ADDR_CTRL1, CTRL1_MODE_SINGLE);
+	ret = write_reg(ADDR_CTRL1, CTRL1_MODE_SINGLE);
 
 	if (OK != ret) {
 		perf_count(_comms_errors);
@@ -792,6 +910,7 @@ IST8310::collect()
 	new_report.timestamp = hrt_absolute_time();
 	new_report.is_external = sensor_is_external;
 	new_report.error_count = perf_event_count(_comms_errors);
+	new_report.range_ga = 1.6f; // constant for this sensor for x and y
 	new_report.scaling = _range_scale;
 	new_report.device_id = _device_id.devid;
 
@@ -899,7 +1018,7 @@ out:
 
 int IST8310::calibrate(struct file *filp, unsigned enable)
 {
-	struct mag_report report {};
+	struct mag_report report;
 	ssize_t sz;
 	int ret = 1;
 	float total_x = 0.0f;
@@ -1049,6 +1168,25 @@ int IST8310::check_offset()
 	return !offset_valid;
 }
 
+int IST8310::check_calibration()
+{
+	bool offset_valid = (check_offset() == OK);
+	bool scale_valid  = (check_scale() == OK);
+
+	if (_calibrated != (offset_valid && scale_valid)) {
+
+		if (!scale_valid || !offset_valid) {
+			PX4_WARN("mag cal status changed %s%s", (scale_valid) ? "" : "scale invalid ",
+				 (offset_valid) ? "" : "offset invalid");
+		}
+
+		_calibrated = (offset_valid && scale_valid);
+	}
+
+	/* return 0 if calibrated, 1 else */
+	return (!_calibrated);
+}
+
 int
 IST8310::set_selftest(unsigned enable)
 {
@@ -1115,7 +1253,7 @@ IST8310::print_info()
 {
 	perf_print_counter(_sample_perf);
 	perf_print_counter(_comms_errors);
-	printf("poll interval:  %u interval\n", _measure_interval);
+	printf("poll interval:  %u ticks\n", _measure_ticks);
 	print_message(_last_report);
 	_reports->print_info("report queue");
 }
@@ -1249,7 +1387,7 @@ void
 test(enum IST8310_BUS busid)
 {
 	struct ist8310_bus_option &bus = find_bus(busid);
-	struct mag_report report {};
+	struct mag_report report;
 	ssize_t sz;
 	int ret;
 	const char *path = bus.devpath;
@@ -1272,6 +1410,16 @@ test(enum IST8310_BUS busid)
 	/* check if mag is onboard or external */
 	if ((ret = ioctl(fd, MAGIOCGEXTERNAL, 0)) < 0) {
 		errx(1, "failed to get if mag is onboard or external");
+	}
+
+	/* set the queue depth to 5 */
+	if (OK != ioctl(fd, SENSORIOCSQUEUEDEPTH, 10)) {
+		errx(1, "failed to set queue depth");
+	}
+
+	/* start the sensor polling at 2Hz */
+	if (OK != ioctl(fd, SENSORIOCSPOLLRATE, 2)) {
+		errx(1, "failed to set 2Hz poll rate");
 	}
 
 	/* read the sensor 5x and report each value */

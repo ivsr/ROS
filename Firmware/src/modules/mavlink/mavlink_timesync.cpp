@@ -41,11 +41,16 @@
 #include "mavlink_timesync.h"
 #include "mavlink_main.h"
 
-#include <stdlib.h>
-
 MavlinkTimesync::MavlinkTimesync(Mavlink *mavlink) :
 	_mavlink(mavlink)
 {
+}
+
+MavlinkTimesync::~MavlinkTimesync()
+{
+	if (_timesync_status_pub) {
+		orb_unadvertise(_timesync_status_pub);
+	}
 }
 
 void
@@ -102,10 +107,10 @@ MavlinkTimesync::handle_message(const mavlink_message_t *msg)
 						// Filter gain scheduling
 						if (!sync_converged()) {
 							// Interpolate with a sigmoid function
-							double progress = (double)_sequence / (double)CONVERGENCE_WINDOW;
-							double p = 1.0 - exp(0.5 * (1.0 - 1.0 / (1.0 - progress)));
-							_filter_alpha = p * ALPHA_GAIN_FINAL + (1.0 - p) * ALPHA_GAIN_INITIAL;
-							_filter_beta = p * BETA_GAIN_FINAL + (1.0 - p) * BETA_GAIN_INITIAL;
+							float progress = ((float)_sequence) / CONVERGENCE_WINDOW;
+							float p = 1.0f - expf(0.5f * (1.0f - 1.0f / (1.0f - progress)));
+							_filter_alpha = p * (float)ALPHA_GAIN_FINAL + (1.0f - p) * (float)ALPHA_GAIN_INITIAL;
+							_filter_beta = p * (float)BETA_GAIN_FINAL + (1.0f - p) * (float)BETA_GAIN_INITIAL;
 
 						} else {
 							_filter_alpha = ALPHA_GAIN_FINAL;
@@ -138,7 +143,7 @@ MavlinkTimesync::handle_message(const mavlink_message_t *msg)
 				}
 
 				// Publish status message
-				timesync_status_s tsync_status{};
+				struct timesync_status_s tsync_status = {};
 
 				tsync_status.timestamp = hrt_absolute_time();
 				tsync_status.remote_timestamp = tsync.tc1 / 1000ULL;
@@ -146,7 +151,14 @@ MavlinkTimesync::handle_message(const mavlink_message_t *msg)
 				tsync_status.estimated_offset = (int64_t)_time_offset;
 				tsync_status.round_trip_time = rtt_us;
 
-				_timesync_status_pub.publish(tsync_status);
+				if (_timesync_status_pub == nullptr) {
+					int instance;
+					_timesync_status_pub = orb_advertise_multi(ORB_ID(timesync_status), &tsync_status, &instance, ORB_PRIO_DEFAULT);
+
+				} else {
+					orb_publish(ORB_ID(timesync_status), _timesync_status_pub, &tsync_status);
+				}
+
 			}
 
 			break;

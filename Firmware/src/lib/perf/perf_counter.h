@@ -40,13 +40,7 @@
 #define _SYSTEMLIB_PERF_COUNTER_H value
 
 #include <stdint.h>
-#include <px4_platform_common/defines.h>
-
-#define LATENCY_BUCKET_COUNT 8
-
-extern const uint16_t latency_bucket_count;
-extern const uint16_t latency_buckets[LATENCY_BUCKET_COUNT];
-extern uint32_t latency_counters[LATENCY_BUCKET_COUNT + 1];
+#include <px4_defines.h>
 
 /**
  * Counter types.

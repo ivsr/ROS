@@ -40,10 +40,10 @@
 
 #include "qshell.h"
 
-#include <px4_platform_common/log.h>
-#include <px4_platform_common/time.h>
-#include <px4_platform_common/posix.h>
-#include <px4_platform_common/defines.h>
+#include <px4_log.h>
+#include <px4_time.h>
+#include <px4_posix.h>
+#include <px4_middleware.h>
 #include <dspal_platform.h>
 
 #include <unistd.h>
@@ -56,7 +56,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include <uORB/topics/qshell_retval.h>
+#include "modules/uORB/uORB.h"
 #include <drivers/drv_hrt.h>
 #include "DriverFramework.hpp"
 
@@ -71,6 +71,7 @@ QShell::QShell()
 
 int QShell::main()
 {
+	int rc;
 	appState.setRunning(true);
 	int sub_qshell_req = orb_subscribe(ORB_ID(qshell_req));
 
@@ -79,63 +80,61 @@ int QShell::main()
 		return -1;
 	}
 
-	px4_pollfd_struct_t fds[1] = {};
-	fds[0].fd = sub_qshell_req;
-	fds[0].events = POLLIN;
+	int i = 0;
 
 	while (!appState.exitRequested()) {
+		bool updated = false;
 
-		int pret = px4_poll(&fds[0], (sizeof(fds) / sizeof(fds[0])), 1000);
+		if (orb_check(sub_qshell_req, &updated) == 0) {
+			if (updated) {
+				PX4_DEBUG("[%d]qshell_req status is updated... reading new value", i);
 
-		if (pret > 0 && fds[0].revents & POLLIN) {
+				if (orb_copy(ORB_ID(qshell_req), sub_qshell_req, &m_qshell_req) != 0) {
+					PX4_ERR("[%d]Error calling orb copy for qshell_req... ", i);
+					break;
+				}
 
-			orb_copy(ORB_ID(qshell_req), sub_qshell_req, &m_qshell_req);
+				char current_char;
+				std::string arg;
+				std::vector<std::string> appargs;
 
-			PX4_INFO("qshell gotten: %s", m_qshell_req.cmd);
-			char current_char;
-			std::string arg;
-			std::vector<std::string> appargs;
+				for (size_t str_idx = 0; str_idx < m_qshell_req.strlen; str_idx++) {
+					current_char = m_qshell_req.string[str_idx];
 
-			for (unsigned str_idx = 0; str_idx < m_qshell_req.strlen; str_idx++) {
-				current_char = m_qshell_req.cmd[str_idx];
+					if (isspace(current_char)) { // split at spaces
+						if (arg.length()) {
+							appargs.push_back(arg);
+							arg = "";
+						}
 
-				if (isspace(current_char)) { // split at spaces
-					if (arg.length()) {
-						appargs.push_back(arg);
-						arg = "";
+					} else {
+						arg += current_char;
 					}
+				}
 
-				} else {
-					arg += current_char;
+				appargs.push_back(arg);  // push last argument
+
+				int ret = run_cmd(appargs);
+
+				if (ret) {
+					PX4_ERR("Failed to execute command");
 				}
 			}
 
-			appargs.push_back(arg);  // push last argument
-
-			qshell_retval_s retval{};
-			retval.return_value = run_cmd(appargs);
-			retval.return_sequence = m_qshell_req.request_sequence;
-
-			if (retval.return_value) {
-				PX4_ERR("Failed to execute command: %s", m_qshell_req.cmd);
-
-			} else {
-				PX4_INFO("Ok executing command: %s", m_qshell_req.cmd);
-			}
-
-			retval.timestamp = hrt_absolute_time();
-			_qshell_retval_pub.publish(retval);
-
-		} else if (pret == 0) {
-			// Timing out is fine.
 		} else {
-			// Something is wrong.
-			usleep(10000);
+			PX4_ERR("[%d]Error checking the updated status for qshell_req ", i);
+			break;
 		}
+
+		// sleep for 1/2 sec.
+		usleep(500000);
+
+		++i;
 	}
 
-	appState.setRunning(false);
 	return 0;
+	appState.setRunning(false);
+	return rc;
 }
 
 int QShell::run_cmd(const std::vector<std::string> &appargs)

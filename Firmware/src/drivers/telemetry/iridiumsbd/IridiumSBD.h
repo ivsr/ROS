@@ -36,13 +36,11 @@
 #include <stdlib.h>
 #include <stdbool.h>
 
-#include <lib/cdev/CDev.hpp>
+#include <drivers/device/device.h>
 #include <drivers/drv_hrt.h>
 
-#include <uORB/Publication.hpp>
-#include <uORB/PublicationQueued.hpp>
+#include <uORB/uORB.h>
 #include <uORB/topics/iridiumsbd_status.h>
-#include <uORB/topics/subsystem_info.h>
 
 typedef enum {
 	SATCOM_OK = 0,
@@ -99,7 +97,7 @@ extern "C" __EXPORT int iridiumsbd_main(int argc, char *argv[]);
  * 	- Improve TX buffer handling:
  * 		- Do not reset the full TX buffer but delete the oldest HIGH_LATENCY2 message if one is in the buffer or delete the oldest message in general
  */
-class IridiumSBD : public cdev::CDev
+class IridiumSBD : public device::CDev
 {
 public:
 	/*
@@ -258,8 +256,6 @@ private:
 
 	void publish_iridium_status(void);
 
-	void publish_subsystem_status();
-
 	/**
 	 * Notification of the first open of CDev.
 	 *
@@ -289,7 +285,6 @@ private:
 	static IridiumSBD *instance;
 	static int task_handle;
 	bool _task_should_exit = false;
-	bool _start_completed = false;
 	int uart_fd = -1;
 
 	int32_t _param_read_interval_s = -1;
@@ -305,8 +300,7 @@ private:
 	bool _writing_mavlink_packet = false;
 	uint16_t _packet_length = 0;
 
-	uORB::Publication<iridiumsbd_status_s> _iridiumsbd_status_pub{ORB_ID(iridiumsbd_status)};
-	uORB::PublicationQueued<subsystem_info_s> _subsystem_pub{ORB_ID(subsystem_info)};
+	orb_advert_t _iridiumsbd_status_pub = nullptr;
 
 	bool _test_pending = false;
 	char _test_command[32];
@@ -344,5 +338,4 @@ private:
 	bool _verbose = false;
 
 	iridiumsbd_status_s _status = {};
-	subsystem_info_s _info = {};
 };

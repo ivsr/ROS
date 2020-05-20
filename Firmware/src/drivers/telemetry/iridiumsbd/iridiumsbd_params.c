@@ -1,3 +1,4 @@
+#include <parameters/param.h>
 
 /**
  * Satellite radio read interval. Only required to be nonzero if data is not sent using a ring call.

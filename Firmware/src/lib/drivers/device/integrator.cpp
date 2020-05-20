@@ -41,18 +41,25 @@
  */
 
 #include "integrator.h"
-
 #include <drivers/drv_hrt.h>
 
-Integrator::Integrator(uint32_t auto_reset_interval, bool coning_compensation) :
+Integrator::Integrator(uint64_t auto_reset_interval, bool coning_compensation) :
+	_auto_reset_interval(auto_reset_interval),
+	_last_integration_time(0),
+	_last_reset_time(0),
+	_alpha(0.0f, 0.0f, 0.0f),
+	_last_alpha(0.0f, 0.0f, 0.0f),
+	_beta(0.0f, 0.0f, 0.0f),
+	_last_val(0.0f, 0.0f, 0.0f),
+	_last_delta_alpha(0.0f, 0.0f, 0.0f),
 	_coning_comp_on(coning_compensation)
 {
-	set_autoreset_interval(auto_reset_interval);
 }
 
+Integrator::~Integrator() = default;
+
 bool
-Integrator::put(const hrt_abstime &timestamp, const matrix::Vector3f &val, matrix::Vector3f &integral,
-		uint32_t &integral_dt)
+Integrator::put(uint64_t timestamp, matrix::Vector3f &val, matrix::Vector3f &integral, uint64_t &integral_dt)
 {
 	if (_last_integration_time == 0) {
 		/* this is the first item in the integrator */
@@ -63,17 +70,17 @@ Integrator::put(const hrt_abstime &timestamp, const matrix::Vector3f &val, matri
 		return false;
 	}
 
-	float dt = 0.0f;
+	double dt = 0.0;
 
 	// Integrate:
 	// Leave dt at 0 if the integration time does not make sense.
 	// Without this check the integral is likely to explode.
 	if (timestamp >= _last_integration_time) {
-		dt = static_cast<float>(timestamp - _last_integration_time) * 1e-6f;
+		dt = (double)(timestamp - _last_integration_time) / 1000000.0;
 	}
 
 	// Use trapezoidal integration to calculate the delta integral
-	const matrix::Vector3f delta_alpha = (val + _last_val) * dt * 0.5f;
+	matrix::Vector3f delta_alpha = (val + _last_val) * dt * 0.5f;
 	_last_val = val;
 
 	// Calculate coning corrections if required
@@ -116,11 +123,11 @@ Integrator::put(const hrt_abstime &timestamp, const matrix::Vector3f &val, matri
 
 bool
 Integrator::put_with_interval(unsigned interval_us, matrix::Vector3f &val, matrix::Vector3f &integral,
-			      uint32_t &integral_dt)
+			      uint64_t &integral_dt)
 {
 	if (_last_integration_time == 0) {
 		/* this is the first item in the integrator */
-		hrt_abstime now = hrt_absolute_time();
+		uint64_t now = hrt_absolute_time();
 		_last_integration_time = now;
 		_last_reset_time = now;
 		_last_val = val;
@@ -129,13 +136,13 @@ Integrator::put_with_interval(unsigned interval_us, matrix::Vector3f &val, matri
 	}
 
 	// Create the timestamp artifically.
-	const hrt_abstime timestamp = _last_integration_time + interval_us;
+	uint64_t timestamp = _last_integration_time + interval_us;
 
 	return put(timestamp, val, integral, integral_dt);
 }
 
 matrix::Vector3f
-Integrator::get(bool reset, uint32_t &integral_dt)
+Integrator::get(bool reset, uint64_t &integral_dt)
 {
 	matrix::Vector3f val = _alpha;
 
@@ -147,25 +154,32 @@ Integrator::get(bool reset, uint32_t &integral_dt)
 }
 
 matrix::Vector3f
-Integrator::get_and_filtered(bool reset, uint32_t &integral_dt, matrix::Vector3f &filtered_val)
+Integrator::get_and_filtered(bool reset, uint64_t &integral_dt, matrix::Vector3f &filtered_val)
 {
 	// Do the usual get with reset first but don't return yet.
-	const matrix::Vector3f ret_integral = get(reset, integral_dt);
+	matrix::Vector3f ret_integral = get(reset, integral_dt);
 
 	// Because we need both the integral and the integral_dt.
-	filtered_val = ret_integral * 1000000 / integral_dt;
+	filtered_val(0) = ret_integral(0) * 1000000 / integral_dt;
+	filtered_val(1) = ret_integral(1) * 1000000 / integral_dt;
+	filtered_val(2) = ret_integral(2) * 1000000 / integral_dt;
 
 	return ret_integral;
 }
 
 void
-Integrator::_reset(uint32_t &integral_dt)
+Integrator::_reset(uint64_t &integral_dt)
 {
-	_alpha.zero();
-	_last_alpha.zero();
-	_beta.zero();
+	_alpha(0) = 0.0f;
+	_alpha(1) = 0.0f;
+	_alpha(2) = 0.0f;
+	_last_alpha(0) = 0.0f;
+	_last_alpha(1) = 0.0f;
+	_last_alpha(2) = 0.0f;
+	_beta(0) = 0.0f;
+	_beta(1) = 0.0f;
+	_beta(2) = 0.0f;
 
 	integral_dt = (_last_integration_time - _last_reset_time);
-
 	_last_reset_time = _last_integration_time;
 }

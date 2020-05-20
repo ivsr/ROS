@@ -33,10 +33,9 @@
 px4_add_module(
 	MODULE drivers__fxas21002c
 	MAIN fxas21002c
+	STACK_MAIN 1200
 	COMPILE_FLAGS
-		-Wno-cast-align # TODO: fix and enable
 	SRCS
-		FXAS21002C.cpp
-		FXAS21002C.hpp
-		fxas21002c_main.cpp
+		fxas21002c.cpp
+	DEPENDS
 	)

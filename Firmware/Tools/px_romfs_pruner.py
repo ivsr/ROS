@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 ############################################################################
 #
-#   Copyright (C) 2014-2018 PX4 Development Team. All rights reserved.
+#   Copyright (C) 2014-2016 PX4 Development Team. All rights reserved.
 
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -35,10 +35,10 @@
 
 """
 px_romfs_pruner.py:
-Try to keep size of the ROMFS minimal.
+Try to keep size of ROMFS minimal.
 
 This script goes through the temporarily copied ROMFS data and deletes all
-comments, empty lines and unnecessary whitespace.
+comments, empty lines and leading whitespace.
 It also deletes hidden files such as auto-saved backups that a text editor
 might have left in the tree.
 
@@ -49,7 +49,6 @@ from __future__ import print_function
 import argparse
 import re
 import os
-import io
 
 
 def main():
@@ -89,16 +88,14 @@ def main():
             # read file line by line
             pruned_content = ""
             board_excluded = False
-            with io.open(file_path, "r", newline=None) as f:
+            with open(file_path, "rU") as f:
                 for line in f:
-                    if re.search(r'\b{0} exclude\b'.format(args.board), line):
-                        board_excluded = True
+                    if re.search(r'\b{0} exclude\b'.format(args.board),line):
+                        board_excluded = True;
                     # handle mixer files differently than startup files
                     if file_path.endswith(".mix"):
-                        if line.startswith(("Z:", "M:", "R: ", "O:", "S:",
-                                            "H:", "T:", "P:")):
-                            # reduce multiple consecutive spaces into a
-                            # single space
+                        if line.startswith(("Z:", "M:", "R: ", "O:", "S:", "H:", "T:", "P:")):
+                            # reduce multiple consecutive spaces into a single space
                             line_reduced = re.sub(' +', ' ', line)
                             pruned_content += line_reduced
                     else:

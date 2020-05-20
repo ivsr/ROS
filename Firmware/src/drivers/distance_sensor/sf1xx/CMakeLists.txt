@@ -31,10 +31,11 @@
 #
 ############################################################################
 px4_add_module(
+
 	MODULE drivers__sf1xx
 	MAIN sf1xx
 	COMPILE_FLAGS
-		-Wno-cast-align # TODO: fix and enable
+		-Wno-sign-compare
 	SRCS
 		sf1xx.cpp
 	DEPENDS

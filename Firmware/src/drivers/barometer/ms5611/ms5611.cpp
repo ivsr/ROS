@@ -33,20 +33,205 @@
 
 /**
  * @file ms5611.cpp
- * Driver for the MS5611 and MS5607 barometric pressure sensor connected via I2C or SPI.
+ * Driver for the MS5611 and MS6507 barometric pressure sensor connected via I2C or SPI.
  */
 
-#include "MS5611.hpp"
+#include <px4_config.h>
+
+#include <sys/types.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <semaphore.h>
+#include <string.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <errno.h>
+#include <stdio.h>
+#include <math.h>
+#include <unistd.h>
+
+#include <nuttx/arch.h>
+#include <nuttx/wqueue.h>
+#include <nuttx/clock.h>
+
+#include <arch/board/board.h>
+#include <board_config.h>
+
+#include <drivers/device/device.h>
+#include <drivers/drv_baro.h>
+#include <drivers/drv_hrt.h>
+#include <drivers/device/ringbuffer.h>
+
+#include <perf/perf_counter.h>
+#include <systemlib/err.h>
+#include <platforms/px4_getopt.h>
+
 #include "ms5611.h"
 
-#include <cdev/CDev.hpp>
+enum MS56XX_DEVICE_TYPES {
+	MS56XX_DEVICE   = 0,
+	MS5611_DEVICE	= 5611,
+	MS5607_DEVICE	= 5607,
+};
+
+enum MS5611_BUS {
+	MS5611_BUS_ALL = 0,
+	MS5611_BUS_I2C_INTERNAL,
+	MS5611_BUS_I2C_EXTERNAL,
+	MS5611_BUS_SPI_INTERNAL,
+	MS5611_BUS_SPI_EXTERNAL
+};
+
+#ifndef CONFIG_SCHED_WORKQUEUE
+# error This requires CONFIG_SCHED_WORKQUEUE.
+#endif
+
+/* helper macro for handling report buffer indices */
+#define INCREMENT(_x, _lim)	do { __typeof__(_x) _tmp = _x+1; if (_tmp >= _lim) _tmp = 0; _x = _tmp; } while(0)
+
+/* helper macro for arithmetic - returns the square of the argument */
+#define POW2(_x)		((_x) * (_x))
+
+/*
+ * MS5611/MS5607 internal constants and data structures.
+ */
+#define ADDR_CMD_CONVERT_D1_OSR256		0x40	/* write to this address to start pressure conversion */
+#define ADDR_CMD_CONVERT_D1_OSR512		0x42	/* write to this address to start pressure conversion */
+#define ADDR_CMD_CONVERT_D1_OSR1024		0x44	/* write to this address to start pressure conversion */
+#define ADDR_CMD_CONVERT_D1_OSR2048		0x46	/* write to this address to start pressure conversion */
+#define ADDR_CMD_CONVERT_D1_OSR4096		0x48	/* write to this address to start pressure conversion */
+#define ADDR_CMD_CONVERT_D2_OSR256		0x50	/* write to this address to start temperature conversion */
+#define ADDR_CMD_CONVERT_D2_OSR512		0x52	/* write to this address to start temperature conversion */
+#define ADDR_CMD_CONVERT_D2_OSR1024		0x54	/* write to this address to start temperature conversion */
+#define ADDR_CMD_CONVERT_D2_OSR2048		0x56	/* write to this address to start temperature conversion */
+#define ADDR_CMD_CONVERT_D2_OSR4096		0x58	/* write to this address to start temperature conversion */
+
+/*
+  use an OSR of 1024 to reduce the self-heating effect of the
+  sensor. Information from MS tells us that some individual sensors
+  are quite sensitive to this effect and that reducing the OSR can
+  make a big difference
+ */
+#define ADDR_CMD_CONVERT_D1			ADDR_CMD_CONVERT_D1_OSR1024
+#define ADDR_CMD_CONVERT_D2			ADDR_CMD_CONVERT_D2_OSR1024
+
+/*
+ * Maximum internal conversion time for OSR 1024 is 2.28 ms. We set an update
+ * rate of 100Hz which is be very safe not to read the ADC before the
+ * conversion finished
+ */
+#define MS5611_CONVERSION_INTERVAL	10000	/* microseconds */
+#define MS5611_MEASUREMENT_RATIO	3	/* pressure measurements per temperature measurement */
+#define MS5611_BARO_DEVICE_PATH_EXT	"/dev/ms5611_ext"
+#define MS5611_BARO_DEVICE_PATH_INT	"/dev/ms5611_int"
+
+class MS5611 : public device::CDev
+{
+public:
+	MS5611(device::Device *interface, ms5611::prom_u &prom_buf, const char *path, enum MS56XX_DEVICE_TYPES device_type);
+	~MS5611();
+
+	virtual int		init();
+
+	virtual ssize_t		read(struct file *filp, char *buffer, size_t buflen);
+	virtual int		ioctl(struct file *filp, int cmd, unsigned long arg);
+
+	/**
+	 * Diagnostics - print some basic information about the driver.
+	 */
+	void			print_info();
+
+protected:
+	Device			*_interface;
+
+	ms5611::prom_s		_prom;
+
+	struct work_s		_work;
+	unsigned		_measure_ticks;
+
+	ringbuffer::RingBuffer	*_reports;
+	enum MS56XX_DEVICE_TYPES _device_type;
+	bool			_collect_phase;
+	unsigned		_measure_phase;
+
+	/* intermediate temperature values per MS5611/MS5607 datasheet */
+	int32_t			_TEMP;
+	int64_t			_OFF;
+	int64_t			_SENS;
+	float			_P;
+	float			_T;
+
+	orb_advert_t		_baro_topic;
+	int			_orb_class_instance;
+	int			_class_instance;
+
+	perf_counter_t		_sample_perf;
+	perf_counter_t		_measure_perf;
+	perf_counter_t		_comms_errors;
+
+	/**
+	 * Initialize the automatic measurement state machine and start it.
+	 *
+	 * @param delay_ticks the number of queue ticks before executing the next cycle
+	 *
+	 * @note This function is called at open and error time.  It might make sense
+	 *       to make it more aggressive about resetting the bus in case of errors.
+	 */
+	void			start_cycle(unsigned delay_ticks = 1);
+
+	/**
+	 * Stop the automatic measurement state machine.
+	 */
+	void			stop_cycle();
+
+	/**
+	 * Perform a poll cycle; collect from the previous measurement
+	 * and start a new one.
+	 *
+	 * This is the heart of the measurement state machine.  This function
+	 * alternately starts a measurement, or collects the data from the
+	 * previous measurement.
+	 *
+	 * When the interval between measurements is greater than the minimum
+	 * measurement interval, a gap is inserted between collection
+	 * and measurement to provide the most recent measurement possible
+	 * at the next interval.
+	 */
+	void			cycle();
+
+	/**
+	 * Static trampoline from the workq context; because we don't have a
+	 * generic workq wrapper yet.
+	 *
+	 * @param arg		Instance pointer for the driver that is polling.
+	 */
+	static void		cycle_trampoline(void *arg);
+
+	/**
+	 * Issue a measurement command for the current state.
+	 *
+	 * @return		OK if the measurement command was successful.
+	 */
+	virtual int		measure();
+
+	/**
+	 * Collect the result of the most recent measurement.
+	 */
+	virtual int		collect();
+};
+
+/*
+ * Driver 'main' command.
+ */
+extern "C" __EXPORT int ms5611_main(int argc, char *argv[]);
 
 MS5611::MS5611(device::Device *interface, ms5611::prom_u &prom_buf, const char *path,
 	       enum MS56XX_DEVICE_TYPES device_type) :
-	CDev(path),
-	ScheduledWorkItem(MODULE_NAME, px4::device_bus_to_wq(interface->get_device_id())),
+	CDev("MS5611", path),
 	_interface(interface),
 	_prom(prom_buf.s),
+	_measure_ticks(0),
 	_reports(nullptr),
 	_device_type(device_type),
 	_collect_phase(false),
@@ -61,12 +246,22 @@ MS5611::MS5611(device::Device *interface, ms5611::prom_u &prom_buf, const char *
 	_measure_perf(perf_alloc(PC_ELAPSED, "ms5611_measure")),
 	_comms_errors(perf_alloc(PC_COUNT, "ms5611_com_err"))
 {
+	// work_cancel in stop_cycle called from the dtor will explode if we don't do this...
+	memset(&_work, 0, sizeof(_work));
+
+	// set the device type from the interface
+	_device_id.devid_s.bus_type = _interface->get_device_bus_type();
+	_device_id.devid_s.bus = _interface->get_device_bus();
+	_device_id.devid_s.address = _interface->get_device_address();
+
+	/* set later on init */
+	_device_id.devid_s.devtype = 0;
 }
 
 MS5611::~MS5611()
 {
 	/* make sure we are truly inactive */
-	stop();
+	stop_cycle();
 
 	if (_class_instance != -1) {
 		unregister_class_devname(get_devname(), _class_instance);
@@ -94,7 +289,7 @@ MS5611::init()
 	ret = CDev::init();
 
 	if (ret != OK) {
-		PX4_DEBUG("CDev init failed");
+		DEVICE_DEBUG("CDev init failed");
 		goto out;
 	}
 
@@ -102,7 +297,7 @@ MS5611::init()
 	_reports = new ringbuffer::RingBuffer(2, sizeof(sensor_baro_s));
 
 	if (_reports == nullptr) {
-		PX4_DEBUG("can't get memory for reports");
+		DEVICE_DEBUG("can't get memory for reports");
 		ret = -ENOMEM;
 		goto out;
 	}
@@ -110,7 +305,7 @@ MS5611::init()
 	/* register alternate interfaces if we have to */
 	_class_instance = register_class_devname(BARO_BASE_DEVICE_PATH);
 
-	sensor_baro_s brp;
+	struct baro_report brp;
 	/* do a first measurement cycle to populate reports with valid data */
 	_measure_phase = 0;
 	_reports->flush();
@@ -128,7 +323,7 @@ MS5611::init()
 			break;
 		}
 
-		px4_usleep(MS5611_CONVERSION_INTERVAL);
+		usleep(MS5611_CONVERSION_INTERVAL);
 
 		if (OK != collect()) {
 			ret = -EIO;
@@ -141,7 +336,7 @@ MS5611::init()
 			break;
 		}
 
-		px4_usleep(MS5611_CONVERSION_INTERVAL);
+		usleep(MS5611_CONVERSION_INTERVAL);
 
 		if (OK != collect()) {
 			ret = -EIO;
@@ -175,16 +370,16 @@ MS5611::init()
 
 		/* fall through */
 		case MS5611_DEVICE:
-			_interface->set_device_type(DRV_BARO_DEVTYPE_MS5611);
+			_device_id.devid_s.devtype = DRV_BARO_DEVTYPE_MS5611;
 			break;
 
 		case MS5607_DEVICE:
-			_interface->set_device_type(DRV_BARO_DEVTYPE_MS5607);
+			_device_id.devid_s.devtype = DRV_BARO_DEVTYPE_MS5607;
 			break;
 		}
 
 		/* ensure correct devid */
-		brp.device_id = _interface->get_device_id();
+		brp.device_id = _device_id.devid;
 
 		ret = OK;
 
@@ -203,10 +398,10 @@ out:
 }
 
 ssize_t
-MS5611::read(cdev::file_t *filp, char *buffer, size_t buflen)
+MS5611::read(struct file *filp, char *buffer, size_t buflen)
 {
-	unsigned count = buflen / sizeof(sensor_baro_s);
-	sensor_baro_s *brp = reinterpret_cast<sensor_baro_s *>(buffer);
+	unsigned count = buflen / sizeof(struct baro_report);
+	struct baro_report *brp = reinterpret_cast<struct baro_report *>(buffer);
 	int ret = 0;
 
 	/* buffer must be large enough */
@@ -215,7 +410,7 @@ MS5611::read(cdev::file_t *filp, char *buffer, size_t buflen)
 	}
 
 	/* if automatic measurement is enabled */
-	if (_measure_interval > 0) {
+	if (_measure_ticks > 0) {
 
 		/*
 		 * While there is space in the caller's buffer, and reports, copy them.
@@ -244,7 +439,7 @@ MS5611::read(cdev::file_t *filp, char *buffer, size_t buflen)
 			break;
 		}
 
-		px4_usleep(MS5611_CONVERSION_INTERVAL);
+		usleep(MS5611_CONVERSION_INTERVAL);
 
 		if (OK != collect()) {
 			ret = -EIO;
@@ -257,7 +452,7 @@ MS5611::read(cdev::file_t *filp, char *buffer, size_t buflen)
 			break;
 		}
 
-		px4_usleep(MS5611_CONVERSION_INTERVAL);
+		usleep(MS5611_CONVERSION_INTERVAL);
 
 		if (OK != collect()) {
 			ret = -EIO;
@@ -275,28 +470,38 @@ MS5611::read(cdev::file_t *filp, char *buffer, size_t buflen)
 }
 
 int
-MS5611::ioctl(cdev::file_t *filp, int cmd, unsigned long arg)
+MS5611::ioctl(struct file *filp, int cmd, unsigned long arg)
 {
 	switch (cmd) {
 
 	case SENSORIOCSPOLLRATE: {
 			switch (arg) {
 
+			/* switching to manual polling */
+			case SENSOR_POLLRATE_MANUAL:
+				stop_cycle();
+				_measure_ticks = 0;
+				return OK;
+
+			/* external signalling not supported */
+			case SENSOR_POLLRATE_EXTERNAL:
+
 			/* zero would be bad */
 			case 0:
 				return -EINVAL;
 
-			/* set default polling rate */
+			/* set default/max polling rate */
+			case SENSOR_POLLRATE_MAX:
 			case SENSOR_POLLRATE_DEFAULT: {
 					/* do we need to start internal polling? */
-					bool want_start = (_measure_interval == 0);
+					bool want_start = (_measure_ticks == 0);
 
 					/* set interval for next measurement to minimum legal value */
-					_measure_interval = MS5611_CONVERSION_INTERVAL;
+					_measure_ticks = USEC2TICK(MS5611_CONVERSION_INTERVAL);
 
 					/* if we need to start the poll state machine, do it */
 					if (want_start) {
-						start();
+						start_cycle();
 					}
 
 					return OK;
@@ -305,27 +510,51 @@ MS5611::ioctl(cdev::file_t *filp, int cmd, unsigned long arg)
 			/* adjust to a legal polling interval in Hz */
 			default: {
 					/* do we need to start internal polling? */
-					bool want_start = (_measure_interval == 0);
+					bool want_start = (_measure_ticks == 0);
 
-					/* convert hz to interval via microseconds */
-					unsigned interval = (1000000 / arg);
+					/* convert hz to tick interval via microseconds */
+					unsigned ticks = USEC2TICK(1000000 / arg);
 
 					/* check against maximum rate */
-					if (_measure_interval < MS5611_CONVERSION_INTERVAL) {
+					if (ticks < USEC2TICK(MS5611_CONVERSION_INTERVAL)) {
 						return -EINVAL;
 					}
 
 					/* update interval for next measurement */
-					_measure_interval = interval;
+					_measure_ticks = ticks;
 
 					/* if we need to start the poll state machine, do it */
 					if (want_start) {
-						start();
+						start_cycle();
 					}
 
 					return OK;
 				}
 			}
+		}
+
+	case SENSORIOCGPOLLRATE:
+		if (_measure_ticks == 0) {
+			return SENSOR_POLLRATE_MANUAL;
+		}
+
+		return (1000 / _measure_ticks);
+
+	case SENSORIOCSQUEUEDEPTH: {
+			/* lower bound is mandatory, upper bound is a sanity check */
+			if ((arg < 1) || (arg > 100)) {
+				return -EINVAL;
+			}
+
+			irqstate_t flags = px4_enter_critical_section();
+
+			if (!_reports->resize(arg)) {
+				px4_leave_critical_section(flags);
+				return -ENOMEM;
+			}
+
+			px4_leave_critical_section(flags);
+			return OK;
 		}
 
 	case SENSORIOCRESET:
@@ -345,25 +574,34 @@ MS5611::ioctl(cdev::file_t *filp, int cmd, unsigned long arg)
 }
 
 void
-MS5611::start()
+MS5611::start_cycle(unsigned delay_ticks)
 {
+
 	/* reset the report ring and state machine */
 	_collect_phase = false;
 	_measure_phase = 0;
 	_reports->flush();
 
 	/* schedule a cycle to start things */
-	ScheduleNow();
+	work_queue(HPWORK, &_work, (worker_t)&MS5611::cycle_trampoline, this, delay_ticks);
 }
 
 void
-MS5611::stop()
+MS5611::stop_cycle()
 {
-	ScheduleClear();
+	work_cancel(HPWORK, &_work);
 }
 
 void
-MS5611::Run()
+MS5611::cycle_trampoline(void *arg)
+{
+	MS5611 *dev = reinterpret_cast<MS5611 *>(arg);
+
+	dev->cycle();
+}
+
+void
+MS5611::cycle()
 {
 	int ret;
 	unsigned dummy;
@@ -391,7 +629,7 @@ MS5611::Run()
 			 * to wait 2.8 ms after issuing the sensor reset command
 			 * according to the MS5611 datasheet
 			 */
-			ScheduleDelayed(2800);
+			start_cycle(USEC2TICK(2800));
 			return;
 		}
 
@@ -404,10 +642,14 @@ MS5611::Run()
 		 * doing pressure measurements at something close to the desired rate.
 		 */
 		if ((_measure_phase != 0) &&
-		    (_measure_interval > MS5611_CONVERSION_INTERVAL)) {
+		    (_measure_ticks > USEC2TICK(MS5611_CONVERSION_INTERVAL))) {
 
 			/* schedule a fresh cycle call when we are ready to measure again */
-			ScheduleDelayed(_measure_interval - MS5611_CONVERSION_INTERVAL);
+			work_queue(HPWORK,
+				   &_work,
+				   (worker_t)&MS5611::cycle_trampoline,
+				   this,
+				   _measure_ticks - USEC2TICK(MS5611_CONVERSION_INTERVAL));
 
 			return;
 		}
@@ -420,7 +662,7 @@ MS5611::Run()
 		/* issue a reset command to the sensor */
 		_interface->ioctl(IOCTL_RESET, dummy);
 		/* reset the collection state machine and try again */
-		start();
+		start_cycle();
 		return;
 	}
 
@@ -428,7 +670,11 @@ MS5611::Run()
 	_collect_phase = true;
 
 	/* schedule a fresh cycle call when the measurement is done */
-	ScheduleDelayed(MS5611_CONVERSION_INTERVAL);
+	work_queue(HPWORK,
+		   &_work,
+		   (worker_t)&MS5611::cycle_trampoline,
+		   this,
+		   USEC2TICK(MS5611_CONVERSION_INTERVAL));
 }
 
 int
@@ -465,7 +711,7 @@ MS5611::collect()
 
 	perf_begin(_sample_perf);
 
-	sensor_baro_s report;
+	struct baro_report report;
 	/* this should be fairly close to the end of the conversion, so the best approximation of the time */
 	report.timestamp = hrt_absolute_time();
 	report.error_count = perf_event_count(_comms_errors);
@@ -559,10 +805,10 @@ MS5611::collect()
 		report.pressure = P / 100.0f;		/* convert to millibar */
 
 		/* return device ID */
-		report.device_id = _interface->get_device_id();
+		report.device_id = _device_id.devid;
 
 		/* publish it */
-		if (_baro_topic != nullptr) {
+		if (!(_pub_blocked) && _baro_topic != nullptr) {
 			/* publish it */
 			orb_publish(ORB_ID(sensor_baro), _baro_topic, &report);
 		}
@@ -586,7 +832,7 @@ MS5611::print_info()
 {
 	perf_print_counter(_sample_perf);
 	perf_print_counter(_comms_errors);
-	printf("poll interval:  %u\n", _measure_interval);
+	printf("poll interval:  %u ticks\n", _measure_ticks);
 	_reports->print_info("report queue");
 	printf("device:         %s\n", _device_type == MS5611_DEVICE ? "ms5611" : "ms5607");
 
@@ -600,6 +846,45 @@ MS5611::print_info()
  */
 namespace ms5611
 {
+
+/*
+  list of supported bus configurations
+ */
+struct ms5611_bus_option {
+	enum MS5611_BUS busid;
+	const char *devpath;
+	MS5611_constructor interface_constructor;
+	uint8_t busnum;
+	MS5611 *dev;
+} bus_options[] = {
+#if defined(PX4_SPIDEV_EXT_BARO) && defined(PX4_SPI_BUS_EXT)
+	{ MS5611_BUS_SPI_EXTERNAL, "/dev/ms5611_spi_ext", &MS5611_spi_interface, PX4_SPI_BUS_EXT, NULL },
+#endif
+#ifdef PX4_SPIDEV_BARO
+	{ MS5611_BUS_SPI_INTERNAL, "/dev/ms5611_spi_int", &MS5611_spi_interface, PX4_SPI_BUS_BARO, NULL },
+#endif
+#ifdef PX4_I2C_BUS_ONBOARD
+	{ MS5611_BUS_I2C_INTERNAL, "/dev/ms5611_int", &MS5611_i2c_interface, PX4_I2C_BUS_ONBOARD, NULL },
+#endif
+#ifdef PX4_I2C_BUS_EXPANSION
+	{ MS5611_BUS_I2C_EXTERNAL, "/dev/ms5611_ext", &MS5611_i2c_interface, PX4_I2C_BUS_EXPANSION, NULL },
+#endif
+#ifdef PX4_I2C_BUS_EXPANSION1
+	{ MS5611_BUS_I2C_EXTERNAL, "/dev/ms5611_ext1", &MS5611_i2c_interface, PX4_I2C_BUS_EXPANSION1, NULL },
+#endif
+#ifdef PX4_I2C_BUS_EXPANSION2
+	{ MS5611_BUS_I2C_EXTERNAL, "/dev/ms5611_ext2", &MS5611_i2c_interface, PX4_I2C_BUS_EXPANSION2, NULL },
+#endif
+};
+#define NUM_BUS_OPTIONS (sizeof(bus_options)/sizeof(bus_options[0]))
+
+bool	start_bus(struct ms5611_bus_option &bus, enum MS56XX_DEVICE_TYPES device_type);
+struct ms5611_bus_option &find_bus(enum MS5611_BUS busid);
+void	start(enum MS5611_BUS busid, enum MS56XX_DEVICE_TYPES device_type);
+void	test(enum MS5611_BUS busid);
+void	reset(enum MS5611_BUS busid);
+void	info();
+void	usage();
 
 /**
  * MS5611 crc4 cribbed from the datasheet
@@ -647,4 +932,316 @@ crc4(uint16_t *n_prom)
 	return (0x000F & crc_read) == (n_rem ^ 0x00);
 }
 
-} // namespace ms5611
+
+/**
+ * Start the driver.
+ */
+bool
+start_bus(struct ms5611_bus_option &bus, enum MS56XX_DEVICE_TYPES device_type)
+{
+	if (bus.dev != nullptr) {
+		errx(1, "bus option already started");
+	}
+
+	prom_u prom_buf;
+	device::Device *interface = bus.interface_constructor(prom_buf, bus.busnum);
+
+	if (interface->init() != OK) {
+		delete interface;
+		warnx("no device on bus %u", (unsigned)bus.busid);
+		return false;
+	}
+
+	bus.dev = new MS5611(interface, prom_buf, bus.devpath, device_type);
+
+	if (bus.dev != nullptr && OK != bus.dev->init()) {
+		delete bus.dev;
+		bus.dev = NULL;
+		return false;
+	}
+
+	int fd = open(bus.devpath, O_RDONLY);
+
+	/* set the poll rate to default, starts automatic data collection */
+	if (fd == -1) {
+		errx(1, "can't open baro device");
+	}
+
+	if (ioctl(fd, SENSORIOCSPOLLRATE, SENSOR_POLLRATE_DEFAULT) < 0) {
+		close(fd);
+		errx(1, "failed setting default poll rate");
+	}
+
+	close(fd);
+	return true;
+}
+
+
+/**
+ * Start the driver.
+ *
+ * This function call only returns once the driver
+ * is either successfully up and running or failed to start.
+ */
+void
+start(enum MS5611_BUS busid, enum MS56XX_DEVICE_TYPES device_type)
+{
+	uint8_t i;
+	bool started = false;
+
+	for (i = 0; i < NUM_BUS_OPTIONS; i++) {
+		if (busid == MS5611_BUS_ALL && bus_options[i].dev != NULL) {
+			// this device is already started
+			continue;
+		}
+
+		if (busid != MS5611_BUS_ALL && bus_options[i].busid != busid) {
+			// not the one that is asked for
+			continue;
+		}
+
+		started = started | start_bus(bus_options[i], device_type);
+	}
+
+	if (!started) {
+		exit(1);
+	}
+
+	// one or more drivers started OK
+	exit(0);
+}
+
+
+/**
+ * find a bus structure for a busid
+ */
+struct ms5611_bus_option &find_bus(enum MS5611_BUS busid)
+{
+	for (uint8_t i = 0; i < NUM_BUS_OPTIONS; i++) {
+		if ((busid == MS5611_BUS_ALL ||
+		     busid == bus_options[i].busid) && bus_options[i].dev != NULL) {
+			return bus_options[i];
+		}
+	}
+
+	errx(1, "bus %u not started", (unsigned)busid);
+}
+
+/**
+ * Perform some basic functional tests on the driver;
+ * make sure we can collect data from the sensor in polled
+ * and automatic modes.
+ */
+void
+test(enum MS5611_BUS busid)
+{
+	struct ms5611_bus_option &bus = find_bus(busid);
+	struct baro_report report;
+	ssize_t sz;
+	int ret;
+
+	int fd;
+
+	fd = open(bus.devpath, O_RDONLY);
+
+	if (fd < 0) {
+		err(1, "open failed (try 'ms5611 start' if the driver is not running)");
+	}
+
+	/* do a simple demand read */
+	sz = read(fd, &report, sizeof(report));
+
+	if (sz != sizeof(report)) {
+		err(1, "immediate read failed");
+	}
+
+	print_message(report);
+
+	/* set the queue depth to 10 */
+	if (OK != ioctl(fd, SENSORIOCSQUEUEDEPTH, 10)) {
+		errx(1, "failed to set queue depth");
+	}
+
+	/* start the sensor polling at 2Hz */
+	if (OK != ioctl(fd, SENSORIOCSPOLLRATE, 2)) {
+		errx(1, "failed to set 2Hz poll rate");
+	}
+
+	/* read the sensor 5x and report each value */
+	for (unsigned i = 0; i < 5; i++) {
+		struct pollfd fds;
+
+		/* wait for data to be ready */
+		fds.fd = fd;
+		fds.events = POLLIN;
+		ret = poll(&fds, 1, 2000);
+
+		if (ret != 1) {
+			errx(1, "timed out waiting for sensor data");
+		}
+
+		/* now go get it */
+		sz = read(fd, &report, sizeof(report));
+
+		if (sz != sizeof(report)) {
+			err(1, "periodic read failed");
+		}
+
+		print_message(report);
+	}
+
+	close(fd);
+	errx(0, "PASS");
+}
+
+/**
+ * Reset the driver.
+ */
+void
+reset(enum MS5611_BUS busid)
+{
+	struct ms5611_bus_option &bus = find_bus(busid);
+	int fd;
+
+	fd = open(bus.devpath, O_RDONLY);
+
+	if (fd < 0) {
+		err(1, "failed ");
+	}
+
+	if (ioctl(fd, SENSORIOCRESET, 0) < 0) {
+		err(1, "driver reset failed");
+	}
+
+	if (ioctl(fd, SENSORIOCSPOLLRATE, SENSOR_POLLRATE_DEFAULT) < 0) {
+		err(1, "driver poll restart failed");
+	}
+
+	exit(0);
+}
+
+/**
+ * Print a little info about the driver.
+ */
+void
+info()
+{
+	for (uint8_t i = 0; i < NUM_BUS_OPTIONS; i++) {
+		struct ms5611_bus_option &bus = bus_options[i];
+
+		if (bus.dev != nullptr) {
+			warnx("%s", bus.devpath);
+			bus.dev->print_info();
+		}
+	}
+
+	exit(0);
+}
+
+void
+usage()
+{
+	warnx("missing command: try 'start', 'info', 'test', 'test2', 'reset'");
+	warnx("options:");
+	warnx("    -X    (external I2C bus)");
+	warnx("    -I    (intternal I2C bus)");
+	warnx("    -S    (external SPI bus)");
+	warnx("    -s    (internal SPI bus)");
+	warnx("    -T    5611|5607 (default 5611)");
+	warnx("    -T    0 (autodetect version)");
+
+}
+
+} // namespace
+
+int
+ms5611_main(int argc, char *argv[])
+{
+	enum MS5611_BUS busid = MS5611_BUS_ALL;
+	enum MS56XX_DEVICE_TYPES device_type = MS5611_DEVICE;
+	int ch;
+	int myoptind = 1;
+	const char *myoptarg = NULL;
+
+	/* jump over start/off/etc and look at options first */
+	while ((ch = px4_getopt(argc, argv, "T:XISs", &myoptind, &myoptarg)) != EOF) {
+		switch (ch) {
+		case 'X':
+			busid = MS5611_BUS_I2C_EXTERNAL;
+			break;
+
+		case 'I':
+			busid = MS5611_BUS_I2C_INTERNAL;
+			break;
+
+		case 'S':
+			busid = MS5611_BUS_SPI_EXTERNAL;
+			break;
+
+		case 's':
+			busid = MS5611_BUS_SPI_INTERNAL;
+			break;
+
+		case 'T': {
+				int val = atoi(myoptarg);
+
+				if (val == 5611) {
+					device_type = MS5611_DEVICE;
+					break;
+
+				} else if (val == 5607) {
+					device_type = MS5607_DEVICE;
+					break;
+
+				} else if (val == 0) {
+					device_type = MS56XX_DEVICE;
+					break;
+				}
+			}
+
+		/* FALLTHROUGH */
+
+		default:
+			ms5611::usage();
+			return 0;
+		}
+	}
+
+	if (myoptind >= argc) {
+		ms5611::usage();
+		return -1;
+	}
+
+	const char *verb = argv[myoptind];
+
+	/*
+	 * Start/load the driver.
+	 */
+	if (!strcmp(verb, "start")) {
+		ms5611::start(busid, device_type);
+	}
+
+	/*
+	 * Test the driver/device.
+	 */
+	if (!strcmp(verb, "test")) {
+		ms5611::test(busid);
+	}
+
+	/*
+	 * Reset the driver.
+	 */
+	if (!strcmp(verb, "reset")) {
+		ms5611::reset(busid);
+	}
+
+	/*
+	 * Print driver information.
+	 */
+	if (!strcmp(verb, "info")) {
+		ms5611::info();
+	}
+
+	PX4_ERR("unrecognised command, try 'start', 'test', 'reset' or 'info'");
+	return -1;
+}

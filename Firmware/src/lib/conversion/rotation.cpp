@@ -37,7 +37,6 @@
  * Vector rotation library
  */
 
-#include <px4_platform_common/defines.h>
 #include "math.h"
 #include "rotation.h"
 
@@ -45,15 +44,6 @@ __EXPORT matrix::Dcmf
 get_rot_matrix(enum Rotation rot)
 {
 	return matrix::Dcmf{matrix::Eulerf{
-			math::radians((float)rot_lookup[rot].roll),
-			math::radians((float)rot_lookup[rot].pitch),
-			math::radians((float)rot_lookup[rot].yaw)}};
-}
-
-__EXPORT matrix::Quatf
-get_rot_quaternion(enum Rotation rot)
-{
-	return matrix::Quatf{matrix::Eulerf{
 			math::radians((float)rot_lookup[rot].roll),
 			math::radians((float)rot_lookup[rot].pitch),
 			math::radians((float)rot_lookup[rot].yaw)}};
@@ -284,14 +274,6 @@ rotate_3f(enum Rotation rot, float &x, float &y, float &z)
 			tmp = M_SQRT1_2_F * x - M_SQRT1_2_F * z;
 			z = M_SQRT1_2_F * z + M_SQRT1_2_F * x;
 			x = tmp;
-			return;
-		}
-
-	case ROTATION_ROLL_90_YAW_270: {
-			tmp = x;
-			x = -z;
-			z = y;
-			y = -tmp;
 			return;
 		}
 	}

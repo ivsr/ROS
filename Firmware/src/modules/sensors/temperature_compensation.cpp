@@ -41,8 +41,8 @@
 
 #include "temperature_compensation.h"
 #include <parameters/param.h>
-#include <px4_platform_common/defines.h>
-#include <px4_platform_common/log.h>
+#include <px4_defines.h>
+#include <px4_log.h>
 
 namespace sensors
 {
@@ -151,7 +151,7 @@ int TemperatureCompensation::initialize_parameter_handles(ParameterHandles &para
 	return PX4_OK;
 }
 
-int TemperatureCompensation::parameters_update(bool hil_enabled)
+int TemperatureCompensation::parameters_update()
 {
 	int ret = 0;
 
@@ -163,12 +163,7 @@ int TemperatureCompensation::parameters_update(bool hil_enabled)
 	}
 
 	/* rate gyro calibration parameters */
-	if (!hil_enabled) {
-		param_get(parameter_handles.gyro_tc_enable, &_parameters.gyro_tc_enable);
-
-	} else {
-		_parameters.gyro_tc_enable = 0;
-	}
+	param_get(parameter_handles.gyro_tc_enable, &(_parameters.gyro_tc_enable));
 
 	if (_parameters.gyro_tc_enable == 1) {
 		for (unsigned j = 0; j < GYRO_COUNT_MAX; j++) {
@@ -201,12 +196,7 @@ int TemperatureCompensation::parameters_update(bool hil_enabled)
 	}
 
 	/* accelerometer calibration parameters */
-	if (!hil_enabled) {
-		param_get(parameter_handles.accel_tc_enable, &_parameters.accel_tc_enable);
-
-	} else {
-		_parameters.accel_tc_enable = 0;
-	}
+	param_get(parameter_handles.accel_tc_enable, &(_parameters.accel_tc_enable));
 
 	if (_parameters.accel_tc_enable == 1) {
 		for (unsigned j = 0; j < ACCEL_COUNT_MAX; j++) {
@@ -239,12 +229,7 @@ int TemperatureCompensation::parameters_update(bool hil_enabled)
 	}
 
 	/* barometer calibration parameters */
-	if (!hil_enabled) {
-		param_get(parameter_handles.baro_tc_enable, &_parameters.baro_tc_enable);
-
-	} else {
-		_parameters.baro_tc_enable = 0;
-	}
+	param_get(parameter_handles.baro_tc_enable, &(_parameters.baro_tc_enable));
 
 	if (_parameters.baro_tc_enable == 1) {
 		for (unsigned j = 0; j < BARO_COUNT_MAX; j++) {
@@ -383,7 +368,7 @@ int TemperatureCompensation::set_sensor_id(uint32_t device_id, int topic_instanc
 		const T *sensor_cal_data, uint8_t sensor_count_max)
 {
 	for (int i = 0; i < sensor_count_max; ++i) {
-		if (device_id == (uint32_t)sensor_cal_data[i].ID) {
+		if (device_id == sensor_cal_data[i].ID) {
 			sensor_data.device_mapping[topic_instance] = i;
 			return i;
 		}

@@ -70,7 +70,7 @@ MS5525::init_ms5525()
 		return false;
 	}
 
-	px4_usleep(3000);
+	usleep(3000);
 
 	// Step 2 - read calibration coefficients from prom
 
@@ -259,7 +259,10 @@ MS5525::collect()
 		.device_id = _device_id.devid
 	};
 
-	_airspeed_pub.publish(diff_pressure);
+	if (_airspeed_pub != nullptr && !(_pub_blocked)) {
+		/* publish it */
+		orb_publish(ORB_ID(differential_pressure), _airspeed_pub, &diff_pressure);
+	}
 
 	ret = OK;
 
@@ -269,7 +272,7 @@ MS5525::collect()
 }
 
 void
-MS5525::Run()
+MS5525::cycle()
 {
 	int ret = PX4_ERROR;
 
@@ -289,10 +292,11 @@ MS5525::Run()
 		_collect_phase = false;
 
 		// is there a collect->measure gap?
-		if (_measure_interval > CONVERSION_INTERVAL) {
+		if (_measure_ticks > USEC2TICK(CONVERSION_INTERVAL)) {
 
 			// schedule a fresh cycle call when we are ready to measure again
-			ScheduleDelayed(_measure_interval - CONVERSION_INTERVAL);
+			work_queue(HPWORK, &_work, (worker_t)&Airspeed::cycle_trampoline, this,
+				   _measure_ticks - USEC2TICK(CONVERSION_INTERVAL));
 
 			return;
 		}
@@ -311,5 +315,5 @@ MS5525::Run()
 	_collect_phase = true;
 
 	// schedule a fresh cycle call when the measurement is done
-	ScheduleDelayed(CONVERSION_INTERVAL);
+	work_queue(HPWORK, &_work, (worker_t)&Airspeed::cycle_trampoline, this, USEC2TICK(CONVERSION_INTERVAL));
 }

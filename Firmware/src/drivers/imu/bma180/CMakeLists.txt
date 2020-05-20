@@ -34,7 +34,8 @@ px4_add_module(
 	MODULE drivers__bma180
 	MAIN bma180
 	COMPILE_FLAGS
-		-Wno-cast-align # TODO: fix and enable
 	SRCS
 		bma180.cpp
+	DEPENDS
 	)
+

@@ -36,14 +36,15 @@
  * Remote Control calibration routine
  */
 
-#include <px4_platform_common/posix.h>
-#include <px4_platform_common/time.h>
-#include <px4_platform_common/defines.h>
+#include <px4_posix.h>
+#include <px4_time.h>
+#include <px4_defines.h>
 
 #include "rc_calibration.h"
 #include "commander_helper.h"
 
-#include <uORB/Subscription.hpp>
+#include <poll.h>
+#include <unistd.h>
 #include <uORB/topics/sensor_combined.h>
 #include <uORB/topics/manual_control_setpoint.h>
 #include <systemlib/mavlink_log.h>
@@ -52,17 +53,18 @@
 
 int do_trim_calibration(orb_advert_t *mavlink_log_pub)
 {
-	uORB::Subscription sub_man{ORB_ID(manual_control_setpoint)};
-	px4_usleep(400000);
-	manual_control_setpoint_s sp{};
-	bool changed = sub_man.updated();
+	int sub_man = orb_subscribe(ORB_ID(manual_control_setpoint));
+	usleep(400000);
+	struct manual_control_setpoint_s sp;
+	bool changed;
+	orb_check(sub_man, &changed);
 
 	if (!changed) {
 		mavlink_log_critical(mavlink_log_pub, "no inputs, aborting");
 		return PX4_ERROR;
 	}
 
-	sub_man.copy(&sp);
+	orb_copy(ORB_ID(manual_control_setpoint), sub_man, &sp);
 
 	/* load trim values which are active */
 	float roll_trim_active;
@@ -96,10 +98,11 @@ int do_trim_calibration(orb_advert_t *mavlink_log_pub)
 
 	if (p1r != 0 || p2r != 0 || p3r != 0) {
 		mavlink_log_critical(mavlink_log_pub, "TRIM: PARAM SET FAIL");
+		px4_close(sub_man);
 		return PX4_ERROR;
 	}
 
 	mavlink_log_info(mavlink_log_pub, "trim cal done");
-
+	px4_close(sub_man);
 	return PX4_OK;
 }

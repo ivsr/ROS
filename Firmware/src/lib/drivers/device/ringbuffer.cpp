@@ -53,7 +53,9 @@ RingBuffer::RingBuffer(unsigned num_items, size_t item_size) :
 
 RingBuffer::~RingBuffer()
 {
-	delete[] _buf;
+	if (_buf != nullptr) {
+		delete[] _buf;
+	}
 }
 
 unsigned

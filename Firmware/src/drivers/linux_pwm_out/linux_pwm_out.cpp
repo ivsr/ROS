@@ -31,18 +31,15 @@
  *
  ****************************************************************************/
 
-#include <errno.h>
 #include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
 
-#include <math.h>
+#include <px4_tasks.h>
+#include <px4_getopt.h>
+#include <px4_posix.h>
+#include <errno.h>
+#include <cmath>	// NAN
 
-#include <px4_platform_common/tasks.h>
-#include <px4_platform_common/getopt.h>
-#include <px4_platform_common/posix.h>
-
-#include <uORB/Subscription.hpp>
+#include <uORB/uORB.h>
 #include <uORB/topics/actuator_controls.h>
 #include <uORB/topics/actuator_outputs.h>
 #include <uORB/topics/actuator_armed.h>
@@ -51,17 +48,16 @@
 
 #include <drivers/drv_hrt.h>
 #include <drivers/drv_mixer.h>
-#include <lib/mixer/MixerGroup.hpp>
+#include <lib/mixer/mixer.h>
 #include <lib/mixer/mixer_load.h>
 #include <parameters/param.h>
-#include <output_limit/output_limit.h>
+#include <pwm_limit/pwm_limit.h>
 #include <perf/perf_counter.h>
 
 #include "common.h"
 #include "navio_sysfs.h"
 #include "PCA9685.h"
 #include "ocpoc_mmap.h"
-#include "bbblue_pwm_rc.h"
 
 namespace linux_pwm_out
 {
@@ -98,7 +94,7 @@ px4_pollfd_struct_t _poll_fds[actuator_controls_s::NUM_ACTUATOR_CONTROL_GROUPS];
 uint32_t	_groups_required = 0;
 uint32_t	_groups_subscribed = 0;
 
-output_limit_t     _pwm_limit;
+pwm_limit_t     _pwm_limit;
 
 // esc parameters
 int32_t _pwm_disarmed;
@@ -119,7 +115,7 @@ static void subscribe();
 
 static void task_main(int argc, char *argv[]);
 
-static void update_params(Mixer::Airmode &airmode);
+static void update_params(bool &airmode);
 
 /* mixer initialization */
 int initialize_mixer(const char *mixer_filename);
@@ -138,13 +134,15 @@ int mixer_control_callback(uintptr_t handle,
 }
 
 
-void update_params(Mixer::Airmode &airmode)
+void update_params(bool &airmode)
 {
 	// multicopter air-mode
 	param_t param_handle = param_find("MC_AIRMODE");
 
 	if (param_handle != PARAM_INVALID) {
-		param_get(param_handle, (int32_t *)&airmode);
+		int32_t val;
+		param_get(param_handle, &val);
+		airmode = val > 0;
 	}
 }
 
@@ -155,12 +153,12 @@ int initialize_mixer(const char *mixer_filename)
 	unsigned buflen = sizeof(buf);
 	memset(buf, '\0', buflen);
 
-	_mixer_group = new MixerGroup();
+	_mixer_group = new MixerGroup(mixer_control_callback, (uintptr_t) &_controls);
 
 	// PX4_INFO("Trying to initialize mixer from config file %s", mixer_filename);
 
 	if (load_mixer_file(mixer_filename, buf, buflen) == 0) {
-		if (_mixer_group->load_from_buf(mixer_control_callback, (uintptr_t) &_controls, buf, buflen) == 0) {
+		if (_mixer_group->load_from_buf(buf, buflen) == 0) {
 			PX4_INFO("Loaded mixer from file %s", mixer_filename);
 			return 0;
 
@@ -235,13 +233,6 @@ void task_main(int argc, char *argv[])
 		PX4_INFO("Starting PWM output in ocpoc_mmap mode");
 		pwm_out = new OcpocMmapPWMOut(_max_num_outputs);
 
-#ifdef __DF_BBBLUE
-
-	} else if (strcmp(_protocol, "bbblue_rc") == 0) {
-		PX4_INFO("Starting PWM output in bbblue_rc mode");
-		pwm_out = new BBBlueRcPWMOut(_max_num_outputs);
-#endif
-
 	} else { /* navio */
 		PX4_INFO("Starting PWM output in Navio mode");
 		pwm_out = new NavioSysfsPWMOut(_device, _max_num_outputs);
@@ -258,9 +249,9 @@ void task_main(int argc, char *argv[])
 	// subscribe and set up polling
 	subscribe();
 
-	Mixer::Airmode airmode = Mixer::Airmode::disabled;
+	bool airmode = false;
 	update_params(airmode);
-	uORB::Subscription parameter_update_sub{ORB_ID(parameter_update)};
+	int params_sub = orb_subscribe(ORB_ID(parameter_update));
 
 	int rc_channels_sub = -1;
 
@@ -268,7 +259,7 @@ void task_main(int argc, char *argv[])
 	_armed.armed = false;
 	_armed.prearmed = false;
 
-	output_limit_init(&_pwm_limit);
+	pwm_limit_init(&_pwm_limit);
 
 	while (!_task_should_exit) {
 
@@ -332,7 +323,7 @@ void task_main(int argc, char *argv[])
 			}
 
 			/* Switch off the PWM limit ramp for the calibration. */
-			_pwm_limit.state = OUTPUT_LIMIT_STATE_ON;
+			_pwm_limit.state = PWM_LIMIT_STATE_ON;
 		}
 
 		if (_mixer_group != nullptr) {
@@ -358,16 +349,16 @@ void task_main(int argc, char *argv[])
 			uint16_t pwm[actuator_outputs_s::NUM_ACTUATOR_OUTPUTS];
 
 			// TODO FIXME: pre-armed seems broken
-			output_limit_calc(_armed.armed,
-					  false/*_armed.prearmed*/,
-					  _outputs.noutputs,
-					  reverse_mask,
-					  disarmed_pwm,
-					  min_pwm,
-					  max_pwm,
-					  _outputs.output,
-					  pwm,
-					  &_pwm_limit);
+			pwm_limit_calc(_armed.armed,
+				       false/*_armed.prearmed*/,
+				       _outputs.noutputs,
+				       reverse_mask,
+				       disarmed_pwm,
+				       min_pwm,
+				       max_pwm,
+				       _outputs.output,
+				       pwm,
+				       &_pwm_limit);
 
 			if (_armed.lockdown || _armed.manual_lockdown) {
 				pwm_out->send_output_pwm(disarmed_pwm, _outputs.noutputs);
@@ -418,15 +409,16 @@ void task_main(int argc, char *argv[])
 			_task_should_exit = true;
 		}
 
-		// check for parameter updates
-		if (parameter_update_sub.updated()) {
-			// clear update
-			parameter_update_s pupdate;
-			parameter_update_sub.copy(&pupdate);
+		/* check for parameter updates */
+		bool param_updated = false;
+		orb_check(params_sub, &param_updated);
 
-			// update parameters from storage
+		if (param_updated) {
+			struct parameter_update_s update;
+			orb_copy(ORB_ID(parameter_update), params_sub, &update);
 			update_params(airmode);
 		}
+
 	}
 
 	delete pwm_out;
@@ -446,6 +438,10 @@ void task_main(int argc, char *argv[])
 		orb_unsubscribe(rc_channels_sub);
 	}
 
+	if (params_sub != -1) {
+		orb_unsubscribe(params_sub);
+	}
+
 	perf_free(_perf_control_latency);
 
 	_is_running = false;
@@ -459,6 +455,8 @@ void task_main_trampoline(int argc, char *argv[])
 
 void start()
 {
+	ASSERT(_task_handle == -1);
+
 	_task_should_exit = false;
 
 	/* start the task */
@@ -470,7 +468,7 @@ void start()
 					  nullptr);
 
 	if (_task_handle < 0) {
-		PX4_ERR("task start failed");
+		warn("task start failed");
 		return;
 	}
 
@@ -495,7 +493,7 @@ void usage()
 	PX4_INFO("                       (default /sys/class/pwm/pwmchip0)");
 	PX4_INFO("       -m mixerfile : path to mixerfile");
 	PX4_INFO("                       (default ROMFS/px4fmu_common/mixers/quad_x.main.mix)");
-	PX4_INFO("       -p protocol : driver output protocol (navio|pca9685|ocpoc_mmap|bbblue_rc)");
+	PX4_INFO("       -p protocol : driver output protocol (navio|pca9685|ocpoc_mmap)");
 	PX4_INFO("                       (default is navio)");
 	PX4_INFO("       -n num_outputs : maximum number of outputs the driver should use");
 	PX4_INFO("                       (default is 8)");

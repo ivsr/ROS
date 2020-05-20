@@ -47,7 +47,7 @@ class PX4IO_Uploader
 {
 public:
 	PX4IO_Uploader();
-	virtual ~PX4IO_Uploader() = default;
+	virtual ~PX4IO_Uploader();
 
 	int			upload(const char *filenames[]);
 

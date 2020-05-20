@@ -59,7 +59,6 @@ class Parameter(object):
         self.default = default
         self.volatile = "false"
         self.category = ""
-        self.boolean = False
 
     def GetName(self):
         return self.name
@@ -75,9 +74,6 @@ class Parameter(object):
 
     def GetVolatile(self):
         return self.volatile
-
-    def GetBoolean(self):
-        return self.boolean
 
     def SetField(self, code, value):
         """
@@ -102,12 +98,6 @@ class Parameter(object):
         Set volatile flag
         """
         self.volatile = "true"
-
-    def SetBoolean(self):
-        """
-        Set boolean flag
-        """
-        self.boolean = True
 
     def SetCategory(self, category):
         """
@@ -196,7 +186,7 @@ class SourceParser(object):
     def __init__(self):
         self.param_groups = {}
 
-    def Parse(self, contents):
+    def Parse(self, scope, contents):
         """
         Incrementally parse program contents and append all found parameters
         to the list.
@@ -298,6 +288,7 @@ class SourceParser(object):
                     if defval != "" and self.re_is_a_number.match(defval):
                         defval = self.re_cut_type_specifier.sub('', defval)
                     param = Parameter(name, tp, defval)
+                    param.SetField("scope", scope)
                     param.SetField("short_desc", name)
                     # If comment was found before the parameter declaration,
                     # inject its data into the newly created parameter.
@@ -315,8 +306,6 @@ class SourceParser(object):
                                 param.SetVolatile()
                             elif tag == "category":
                                 param.SetCategory(tags[tag])
-                            elif tag == "boolean":
-                                param.SetBoolean()
                             elif tag not in self.valid_tags:
                                 sys.stderr.write("Skipping invalid documentation tag: '%s'\n" % tag)
                                 return False

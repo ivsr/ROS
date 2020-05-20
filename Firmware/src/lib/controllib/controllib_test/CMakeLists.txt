@@ -34,7 +34,6 @@ px4_add_module(
 	MODULE lib__controllib__controllib_test
 	MAIN controllib_test
 	COMPILE_FLAGS
-		-Wno-double-promotion # TODO: fix in Matrix library Vector::pow()
 	SRCS
 		controllib_test_main.cpp
 	DEPENDS

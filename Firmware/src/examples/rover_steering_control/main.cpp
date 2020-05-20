@@ -39,8 +39,8 @@
  * @author Lorenz Meier <lorenz@px4.io>
  */
 
-#include <px4_platform_common/px4_config.h>
-#include <px4_platform_common/tasks.h>
+#include <px4_config.h>
+#include <px4_tasks.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,7 +51,7 @@
 #include <poll.h>
 #include <time.h>
 #include <drivers/drv_hrt.h>
-#include <uORB/Subscription.hpp>
+#include <uORB/uORB.h>
 #include <uORB/topics/vehicle_global_position.h>
 #include <uORB/topics/position_setpoint_triplet.h>
 #include <uORB/topics/vehicle_attitude.h>
@@ -182,7 +182,7 @@ void control_attitude(const struct vehicle_attitude_setpoint_s *att_sp, const st
 	actuators->control[2] = yaw_err * pp.yaw_p;
 
 	/* copy throttle */
-	actuators->control[3] = att_sp->thrust_body[0];
+	actuators->control[3] = att_sp->thrust;
 
 	actuators->timestamp = hrt_absolute_time();
 }
@@ -271,15 +271,19 @@ int rover_steering_control_thread_main(int argc, char *argv[])
 
 	int att_sp_sub = orb_subscribe(ORB_ID(vehicle_attitude_setpoint));
 
-	uORB::Subscription parameter_update_sub{ORB_ID(parameter_update)};
+	int param_sub = orb_subscribe(ORB_ID(parameter_update));
 
 	/* Setup of loop */
 
-	struct pollfd fds[1] {};
+	struct pollfd fds[2];
 
-	fds[0].fd = att_sub;
+	fds[0].fd = param_sub;
 
 	fds[0].events = POLLIN;
+
+	fds[1].fd = att_sub;
+
+	fds[1].events = POLLIN;
 
 	while (!thread_should_exit) {
 
@@ -293,7 +297,7 @@ int rover_steering_control_thread_main(int argc, char *argv[])
 		 * This design pattern makes the controller also agnostic of the attitude
 		 * update speed - it runs as fast as the attitude updates with minimal latency.
 		 */
-		int ret = poll(fds, 1, 500);
+		int ret = poll(fds, 2, 500);
 
 		if (ret < 0) {
 			/*
@@ -306,18 +310,18 @@ int rover_steering_control_thread_main(int argc, char *argv[])
 			/* no return value = nothing changed for 500 ms, ignore */
 		} else {
 
-			// check for parameter updates
-			if (parameter_update_sub.updated()) {
-				// clear update
-				parameter_update_s pupdate;
-				parameter_update_sub.copy(&pupdate);
+			/* only update parameters if they changed */
+			if (fds[0].revents & POLLIN) {
+				/* read from param to clear updated flag (uORB API requirement) */
+				struct parameter_update_s update;
+				orb_copy(ORB_ID(parameter_update), param_sub, &update);
 
-				// if a param update occured, re-read our parameters
+				/* if a param update occured, re-read our parameters */
 				parameters_update(&ph, &pp);
 			}
 
 			/* only run controller if attitude changed */
-			if (fds[0].revents & POLLIN) {
+			if (fds[1].revents & POLLIN) {
 
 
 				/* Check if there is a new position measurement or position setpoint */
@@ -391,6 +395,7 @@ usage(const char *reason)
 	}
 
 	fprintf(stderr, "usage: rover_steering_control {start|stop|status}\n\n");
+	exit(1);
 }
 
 /**
@@ -405,7 +410,6 @@ int rover_steering_control_main(int argc, char *argv[])
 {
 	if (argc < 2) {
 		usage("missing command");
-		return 1;
 	}
 
 	if (!strcmp(argv[1], "start")) {
@@ -413,7 +417,7 @@ int rover_steering_control_main(int argc, char *argv[])
 		if (thread_running) {
 			warnx("running");
 			/* this is not an error */
-			return 0;
+			exit(0);
 		}
 
 		thread_should_exit = false;
@@ -424,12 +428,12 @@ int rover_steering_control_main(int argc, char *argv[])
 						 rover_steering_control_thread_main,
 						 (argv) ? (char *const *)&argv[2] : (char *const *)nullptr);
 		thread_running = true;
-		return 0;
+		exit(0);
 	}
 
 	if (!strcmp(argv[1], "stop")) {
 		thread_should_exit = true;
-		return 0;
+		exit(0);
 	}
 
 	if (!strcmp(argv[1], "status")) {
@@ -440,11 +444,11 @@ int rover_steering_control_main(int argc, char *argv[])
 			warnx("not started");
 		}
 
-		return 0;
+		exit(0);
 	}
 
 	usage("unrecognized command");
-	return 1;
+	exit(1);
 }
 
 

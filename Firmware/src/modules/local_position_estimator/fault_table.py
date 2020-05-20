@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/bin/bash
 from __future__ import print_function
 import pylab as pl
 import scipy.optimize

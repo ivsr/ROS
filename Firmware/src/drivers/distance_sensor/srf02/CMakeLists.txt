@@ -34,7 +34,9 @@ px4_add_module(
 	MODULE drivers__srf02
 	MAIN srf02
 	COMPILE_FLAGS
-		-Wno-cast-align # TODO: fix and enable
+		-Wno-sign-compare
 	SRCS
 		srf02.cpp
+	DEPENDS
 	)
+

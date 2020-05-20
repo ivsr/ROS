@@ -52,6 +52,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <unistd.h>
+#include <getopt.h>
 
 #include <perf/perf_counter.h>
 #include <systemlib/err.h>
@@ -140,7 +141,7 @@ TEST_PPM::stop()
 void
 TEST_PPM::loops(void *arg)
 {
-	TEST_PPM *dev = static_cast<TEST_PPM *>(arg);
+	TEST_PPM *dev = reinterpret_cast<TEST_PPM *>(arg);
 	dev->do_out();
 }
 void

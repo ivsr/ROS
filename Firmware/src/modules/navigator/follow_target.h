@@ -46,8 +46,7 @@
 #include <mathlib/mathlib.h>
 #include <matrix/math.hpp>
 
-#include <px4_platform_common/module_params.h>
-#include <uORB/Subscription.hpp>
+#include <px4_module_params.h>
 #include <uORB/topics/follow_target.h>
 
 class FollowTarget : public MissionBlock, public ModuleParams
@@ -91,16 +90,16 @@ private:
 	};
 
 	DEFINE_PARAMETERS(
-		(ParamFloat<px4::params::NAV_MIN_FT_HT>) _param_nav_min_ft_ht,
-		(ParamFloat<px4::params::NAV_FT_DST>) _param_nav_ft_dst,
-		(ParamInt<px4::params::NAV_FT_FS>) _param_nav_ft_fs,
-		(ParamFloat<px4::params::NAV_FT_RS>) _param_nav_ft_rs
+		(ParamFloat<px4::params::NAV_MIN_FT_HT>)	_param_min_alt,
+		(ParamFloat<px4::params::NAV_FT_DST>) _param_tracking_dist,
+		(ParamInt<px4::params::NAV_FT_FS>) _param_tracking_side,
+		(ParamFloat<px4::params::NAV_FT_RS>) _param_tracking_resp
 	)
 
 	FollowTargetState _follow_target_state{SET_WAIT_FOR_TARGET_POSITION};
 	int _follow_target_position{FOLLOW_FROM_BEHIND};
 
-	uORB::Subscription _follow_target_sub{ORB_ID(follow_target)};
+	int _follow_target_sub{-1};
 	float _step_time_in_ms{0.0f};
 	float _follow_offset{OFFSET_M};
 

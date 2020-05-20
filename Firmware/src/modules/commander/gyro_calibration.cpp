@@ -1,35 +1,35 @@
-/****************************************************************************
-*
-*   Copyright (c) 2013-2017 PX4 Development Team. All rights reserved.
-*
-* Redistribution and use in source and binary forms, with or without
-* modification, are permitted provided that the following conditions
-* are met:
-*
-* 1. Redistributions of source code must retain the above copyright
-*    notice, this list of conditions and the following disclaimer.
-* 2. Redistributions in binary form must reproduce the above copyright
-*    notice, this list of conditions and the following disclaimer in
-*    the documentation and/or other materials provided with the
-*    distribution.
-* 3. Neither the name PX4 nor the names of its contributors may be
-*    used to endorse or promote products derived from this software
-*    without specific prior written permission.
-*
-* THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-* "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-* LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
-* FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
-* COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
-* INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
-* BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
-* OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
-* AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
-* LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
-* ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-* POSSIBILITY OF SUCH DAMAGE.
-*
-****************************************************************************/
+ /****************************************************************************
+ *
+ *   Copyright (c) 2013-2017 PX4 Development Team. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in
+ *    the documentation and/or other materials provided with the
+ *    distribution.
+ * 3. Neither the name PX4 nor the names of its contributors may be
+ *    used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+ * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
+ * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
+ * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+ * ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
+ ****************************************************************************/
 
 /**
  * @file gyro_calibration.cpp
@@ -37,21 +37,20 @@
  * Gyroscope calibration routine
  */
 
-#include <px4_platform_common/px4_config.h>
+#include <px4_config.h>
 #include "gyro_calibration.h"
 #include "calibration_messages.h"
 #include "calibration_routines.h"
 #include "commander_helper.h"
 
-#include <px4_platform_common/posix.h>
-#include <px4_platform_common/defines.h>
-#include <px4_platform_common/time.h>
+#include <px4_posix.h>
+#include <px4_defines.h>
+#include <px4_time.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <poll.h>
-#include <math.h>
-#include <mathlib/mathlib.h>
+#include <cmath>
 #include <string.h>
 #include <drivers/drv_hrt.h>
 #include <uORB/topics/sensor_combined.h>
@@ -63,7 +62,7 @@
 
 static const char *sensor_name = "gyro";
 
-static constexpr unsigned max_gyros = 3;
+static const unsigned max_gyros = 3;
 
 /// Data passed to calibration worker routine
 typedef struct  {
@@ -72,20 +71,21 @@ typedef struct  {
 	int			gyro_sensor_sub[max_gyros];
 	int			sensor_correction_sub;
 	struct gyro_calibration_s	gyro_scale[max_gyros];
-	float last_sample_0[3];
+	struct gyro_report	gyro_report_0;
 } gyro_worker_data_t;
 
-static calibrate_return gyro_calibration_worker(int cancel_sub, void *data)
+static calibrate_return gyro_calibration_worker(int cancel_sub, void* data)
 {
-	gyro_worker_data_t	*worker_data = (gyro_worker_data_t *)(data);
+	gyro_worker_data_t*	worker_data = (gyro_worker_data_t*)(data);
 	unsigned		calibration_counter[max_gyros] = { 0 }, slow_count = 0;
-	const unsigned		calibration_count = 250;
-	sensor_gyro_s	gyro_report;
+	const unsigned		calibration_count = 5000;
+	struct gyro_report	gyro_report;
 	unsigned		poll_errcount = 0;
 
-	struct sensor_correction_s sensor_correction {}; /**< sensor thermal corrections */
-
+	struct sensor_correction_s sensor_correction; /**< sensor thermal corrections */
 	if (orb_copy(ORB_ID(sensor_correction), worker_data->sensor_correction_sub, &sensor_correction) != 0) {
+		/* use default values */
+		memset(&sensor_correction, 0, sizeof(sensor_correction));
 		for (unsigned i = 0; i < 3; i++) {
 			sensor_correction.gyro_scale_0[i] = 1.0f;
 			sensor_correction.gyro_scale_1[i] = 1.0f;
@@ -94,13 +94,13 @@ static calibrate_return gyro_calibration_worker(int cancel_sub, void *data)
 	}
 
 	px4_pollfd_struct_t fds[max_gyros];
-
 	for (unsigned s = 0; s < max_gyros; s++) {
 		fds[s].fd = worker_data->gyro_sensor_sub[s];
 		fds[s].events = POLLIN;
 	}
 
-	memset(&worker_data->last_sample_0, 0, sizeof(worker_data->last_sample_0));
+	memset(&worker_data->gyro_report_0, 0, sizeof(worker_data->gyro_report_0));
+
 
 	/* use slowest gyro to pace, but count correctly per-gyro for statistics */
 	while (slow_count < calibration_count) {
@@ -120,7 +120,6 @@ static calibrate_return gyro_calibration_worker(int cancel_sub, void *data)
 
 		if (poll_ret > 0) {
 			unsigned update_count = calibration_count;
-
 			for (unsigned s = 0; s < max_gyros; s++) {
 				if (calibration_counter[s] >= calibration_count) {
 					// Skip if instance has enough samples
@@ -132,43 +131,41 @@ static calibrate_return gyro_calibration_worker(int cancel_sub, void *data)
 
 				if (changed) {
 					orb_copy(ORB_ID(sensor_gyro), worker_data->gyro_sensor_sub[s], &gyro_report);
-					float sample[3];
 
 					if (s == 0) {
 						// take a working copy
-						sample[0] = (gyro_report.x - sensor_correction.gyro_offset_0[0]) * sensor_correction.gyro_scale_0[0];
-						sample[1] = (gyro_report.y - sensor_correction.gyro_offset_0[1]) * sensor_correction.gyro_scale_0[1];
-						sample[2] = (gyro_report.z - sensor_correction.gyro_offset_0[2]) * sensor_correction.gyro_scale_0[2];
+						worker_data->gyro_scale[s].x_offset += (gyro_report.x - sensor_correction.gyro_offset_0[0]) * sensor_correction.gyro_scale_0[0];
+						worker_data->gyro_scale[s].y_offset += (gyro_report.y - sensor_correction.gyro_offset_0[1]) * sensor_correction.gyro_scale_0[1];
+						worker_data->gyro_scale[s].z_offset += (gyro_report.z - sensor_correction.gyro_offset_0[2]) * sensor_correction.gyro_scale_0[2];
 
-						for (int i = 0; i < 3; ++i) {
-							worker_data->last_sample_0[i] = sample[i];
-						}
+						// take a reference copy of the primary sensor including correction for thermal drift
+						orb_copy(ORB_ID(sensor_gyro), worker_data->gyro_sensor_sub[s], &worker_data->gyro_report_0);
+						worker_data->gyro_report_0.x = (gyro_report.x - sensor_correction.gyro_offset_0[0]) * sensor_correction.gyro_scale_0[0];
+						worker_data->gyro_report_0.y = (gyro_report.y - sensor_correction.gyro_offset_0[1]) * sensor_correction.gyro_scale_0[1];
+						worker_data->gyro_report_0.z = (gyro_report.z - sensor_correction.gyro_offset_0[2]) * sensor_correction.gyro_scale_0[2];
 
 					} else if (s == 1) {
-						sample[0] = (gyro_report.x - sensor_correction.gyro_offset_1[0]) * sensor_correction.gyro_scale_1[0];
-						sample[1] = (gyro_report.y - sensor_correction.gyro_offset_1[1]) * sensor_correction.gyro_scale_1[1];
-						sample[2] = (gyro_report.z - sensor_correction.gyro_offset_1[2]) * sensor_correction.gyro_scale_1[2];
+						worker_data->gyro_scale[s].x_offset += (gyro_report.x - sensor_correction.gyro_offset_1[0]) * sensor_correction.gyro_scale_1[0];
+						worker_data->gyro_scale[s].y_offset += (gyro_report.y - sensor_correction.gyro_offset_1[1]) * sensor_correction.gyro_scale_1[1];
+						worker_data->gyro_scale[s].z_offset += (gyro_report.z - sensor_correction.gyro_offset_1[2]) * sensor_correction.gyro_scale_1[2];
 
 					} else if (s == 2) {
-						sample[0] = (gyro_report.x - sensor_correction.gyro_offset_2[0]) * sensor_correction.gyro_scale_2[0];
-						sample[1] = (gyro_report.y - sensor_correction.gyro_offset_2[1]) * sensor_correction.gyro_scale_2[1];
-						sample[2] = (gyro_report.z - sensor_correction.gyro_offset_2[2]) * sensor_correction.gyro_scale_2[2];
+						worker_data->gyro_scale[s].x_offset += (gyro_report.x - sensor_correction.gyro_offset_2[0]) * sensor_correction.gyro_scale_2[0];
+						worker_data->gyro_scale[s].y_offset += (gyro_report.y - sensor_correction.gyro_offset_2[1]) * sensor_correction.gyro_scale_2[1];
+						worker_data->gyro_scale[s].z_offset += (gyro_report.z - sensor_correction.gyro_offset_2[2]) * sensor_correction.gyro_scale_2[2];
 
 					} else {
-						sample[0] = gyro_report.x;
-						sample[1] = gyro_report.y;
-						sample[2] = gyro_report.z;
+						worker_data->gyro_scale[s].x_offset += gyro_report.x;
+						worker_data->gyro_scale[s].y_offset += gyro_report.y;
+						worker_data->gyro_scale[s].z_offset += gyro_report.z;
 
 					}
 
-					worker_data->gyro_scale[s].x_offset += sample[0];
-					worker_data->gyro_scale[s].y_offset += sample[1];
-					worker_data->gyro_scale[s].z_offset += sample[2];
 					calibration_counter[s]++;
 
 				}
 
-				// Maintain the sample count of the slowest sensor
+				// Maintain the sample count of the slowest sensor 
 				if (calibration_counter[s] && calibration_counter[s] < update_count) {
 					update_count = calibration_counter[s];
 				}
@@ -217,7 +214,14 @@ int do_gyro_calibration(orb_advert_t *mavlink_log_pub)
 
 	worker_data.mavlink_log_pub = mavlink_log_pub;
 
-	gyro_calibration_s gyro_scale_zero{};
+	struct gyro_calibration_s gyro_scale_zero;
+	gyro_scale_zero.x_offset = 0.0f;
+	gyro_scale_zero.x_scale = 1.0f;
+	gyro_scale_zero.y_offset = 0.0f;
+	gyro_scale_zero.y_scale = 1.0f;
+	gyro_scale_zero.z_offset = 0.0f;
+	gyro_scale_zero.z_scale = 1.0f;
+
 	int device_prio_max = 0;
 	int32_t device_id_primary = 0;
 
@@ -232,18 +236,16 @@ int do_gyro_calibration(orb_advert_t *mavlink_log_pub)
 		worker_data.gyro_sensor_sub[s] = -1;
 		(void)sprintf(str, "CAL_GYRO%u_ID", s);
 		res = param_set_no_notification(param_find(str), &(worker_data.device_id[s]));
-
 		if (res != PX4_OK) {
 			calibration_log_critical(mavlink_log_pub, "Unable to reset CAL_GYRO%u_ID", s);
 			return PX4_ERROR;
 		}
 
-		// Reset all offsets to 0
+		// Reset all offsets to 0 and scales to 1
 		(void)memcpy(&worker_data.gyro_scale[s], &gyro_scale_zero, sizeof(gyro_scale_zero));
 #ifdef __PX4_NUTTX
 		sprintf(str, "%s%u", GYRO_BASE_DEVICE_PATH, s);
 		int fd = px4_open(str, 0);
-
 		if (fd >= 0) {
 			worker_data.device_id[s] = px4_ioctl(fd, DEVIOCGDEVICEID, 0);
 			res = px4_ioctl(fd, GYROIOCSSCALE, (long unsigned int)&gyro_scale_zero);
@@ -254,29 +256,37 @@ int do_gyro_calibration(orb_advert_t *mavlink_log_pub)
 				return PX4_ERROR;
 			}
 		}
-
 #else
 		(void)sprintf(str, "CAL_GYRO%u_XOFF", s);
 		res = param_set_no_notification(param_find(str), &gyro_scale_zero.x_offset);
-
 		if (res != PX4_OK) {
 			PX4_ERR("unable to reset %s", str);
 		}
-
 		(void)sprintf(str, "CAL_GYRO%u_YOFF", s);
 		res = param_set_no_notification(param_find(str), &gyro_scale_zero.y_offset);
-
 		if (res != PX4_OK) {
 			PX4_ERR("unable to reset %s", str);
 		}
-
 		(void)sprintf(str, "CAL_GYRO%u_ZOFF", s);
 		res = param_set_no_notification(param_find(str), &gyro_scale_zero.z_offset);
-
 		if (res != PX4_OK) {
 			PX4_ERR("unable to reset %s", str);
 		}
-
+		(void)sprintf(str, "CAL_GYRO%u_XSCALE", s);
+		res = param_set_no_notification(param_find(str), &gyro_scale_zero.x_scale);
+		if (res != PX4_OK) {
+			PX4_ERR("unable to reset %s", str);
+		}
+		(void)sprintf(str, "CAL_GYRO%u_YSCALE", s);
+		res = param_set_no_notification(param_find(str), &gyro_scale_zero.y_scale);
+		if (res != PX4_OK) {
+			PX4_ERR("unable to reset %s", str);
+		}
+		(void)sprintf(str, "CAL_GYRO%u_ZSCALE", s);
+		res = param_set_no_notification(param_find(str), &gyro_scale_zero.z_scale);
+		if (res != PX4_OK) {
+			PX4_ERR("unable to reset %s", str);
+		}
 		param_notify_changes();
 #endif
 
@@ -294,11 +304,10 @@ int do_gyro_calibration(orb_advert_t *mavlink_log_pub)
 
 		// Lock in to correct ORB instance
 		bool found_cur_gyro = false;
-
-		for (unsigned i = 0; i < orb_gyro_count && !found_cur_gyro; i++) {
+		for(unsigned i = 0; i < orb_gyro_count && !found_cur_gyro; i++) {
 			worker_data.gyro_sensor_sub[cur_gyro] = orb_subscribe_multi(ORB_ID(sensor_gyro), i);
 
-			sensor_gyro_s report{};
+			struct gyro_report report;
 			orb_copy(ORB_ID(sensor_gyro), worker_data.gyro_sensor_sub[cur_gyro], &report);
 
 #ifdef __PX4_NUTTX
@@ -307,10 +316,9 @@ int do_gyro_calibration(orb_advert_t *mavlink_log_pub)
 			// and match it up with the one from the uORB subscription, because the
 			// instance ordering of uORB and the order of the FDs may not be the same.
 
-			if (report.device_id == (uint32_t)worker_data.device_id[cur_gyro]) {
+			if(report.device_id == worker_data.device_id[cur_gyro]) {
 				// Device IDs match, correct ORB instance for this gyro
 				found_cur_gyro = true;
-
 			} else {
 				orb_unsubscribe(worker_data.gyro_sensor_sub[cur_gyro]);
 			}
@@ -324,9 +332,8 @@ int do_gyro_calibration(orb_advert_t *mavlink_log_pub)
 #endif
 		}
 
-		if (!found_cur_gyro) {
-			calibration_log_critical(mavlink_log_pub, "Gyro #%u (ID %u) no matching uORB devid", cur_gyro,
-						 worker_data.device_id[cur_gyro]);
+		if(!found_cur_gyro) {
+			calibration_log_critical(mavlink_log_pub, "Gyro #%u (ID %u) no matching uORB devid", cur_gyro, worker_data.device_id[cur_gyro]);
 			res = calibrate_return_error;
 			break;
 		}
@@ -340,7 +347,6 @@ int do_gyro_calibration(orb_advert_t *mavlink_log_pub)
 				device_prio_max = prio;
 				device_id_primary = worker_data.device_id[cur_gyro];
 			}
-
 		} else {
 			calibration_log_critical(mavlink_log_pub, "Gyro #%u no device id, abort", cur_gyro);
 		}
@@ -366,12 +372,12 @@ int do_gyro_calibration(orb_advert_t *mavlink_log_pub)
 
 		} else {
 			/* check offsets */
-			float xdiff = worker_data.last_sample_0[0] - worker_data.gyro_scale[0].x_offset;
-			float ydiff = worker_data.last_sample_0[1] - worker_data.gyro_scale[0].y_offset;
-			float zdiff = worker_data.last_sample_0[2] - worker_data.gyro_scale[0].z_offset;
+			float xdiff = worker_data.gyro_report_0.x - worker_data.gyro_scale[0].x_offset;
+			float ydiff = worker_data.gyro_report_0.y - worker_data.gyro_scale[0].y_offset;
+			float zdiff = worker_data.gyro_report_0.z - worker_data.gyro_scale[0].z_offset;
 
-			/* maximum allowable calibration error */
-			const float maxoff = math::radians(0.4f);
+			/* maximum allowable calibration error in radians */
+			const float maxoff = 0.01f;
 
 			if (!PX4_ISFINITE(worker_data.gyro_scale[0].x_offset) ||
 			    !PX4_ISFINITE(worker_data.gyro_scale[0].y_offset) ||
@@ -387,7 +393,6 @@ int do_gyro_calibration(orb_advert_t *mavlink_log_pub)
 				res = PX4_OK;
 			}
 		}
-
 		try_count++;
 
 	} while (res == PX4_ERROR && try_count <= max_tries);
@@ -419,7 +424,6 @@ int do_gyro_calibration(orb_advert_t *mavlink_log_pub)
 				/* check if thermal compensation is enabled */
 				int32_t tc_enabled_int;
 				param_get(param_find("TC_G_ENABLE"), &(tc_enabled_int));
-
 				if (tc_enabled_int == 1) {
 					/* Get struct containing sensor thermal compensation data */
 					struct sensor_correction_s sensor_correction; /**< sensor thermal corrections */
@@ -433,13 +437,11 @@ int do_gyro_calibration(orb_advert_t *mavlink_log_pub)
 						/* update the _X0_ terms to include the additional offset */
 						int32_t handle;
 						float val;
-
 						for (unsigned axis_index = 0; axis_index < 3; axis_index++) {
 							val = 0.0f;
 							(void)sprintf(str, "TC_G%u_X0_%u", sensor_correction.gyro_mapping[uorb_index], axis_index);
 							handle = param_find(str);
 							param_get(handle, &val);
-
 							if (axis_index == 0) {
 								val += worker_data.gyro_scale[uorb_index].x_offset;
 
@@ -450,10 +452,8 @@ int do_gyro_calibration(orb_advert_t *mavlink_log_pub)
 								val += worker_data.gyro_scale[uorb_index].z_offset;
 
 							}
-
 							failed |= (PX4_OK != param_set_no_notification(handle, &val));
 						}
-
 						param_notify_changes();
 					}
 
@@ -487,9 +487,8 @@ int do_gyro_calibration(orb_advert_t *mavlink_log_pub)
 				px4_close(fd);
 
 				if (res != PX4_OK) {
-					calibration_log_critical(mavlink_log_pub, CAL_ERROR_APPLY_CAL_MSG);
+					calibration_log_critical(mavlink_log_pub, CAL_ERROR_APPLY_CAL_MSG, 1);
 				}
-
 #endif
 			}
 		}
@@ -501,11 +500,10 @@ int do_gyro_calibration(orb_advert_t *mavlink_log_pub)
 	}
 
 	/* if there is a any preflight-check system response, let the barrage of messages through */
-	px4_usleep(200000);
+	usleep(200000);
 
 	if (res == PX4_OK) {
 		calibration_log_info(mavlink_log_pub, CAL_QGC_DONE_MSG, sensor_name);
-
 	} else {
 		calibration_log_info(mavlink_log_pub, CAL_QGC_FAILED_MSG, sensor_name);
 	}
@@ -513,7 +511,7 @@ int do_gyro_calibration(orb_advert_t *mavlink_log_pub)
 	orb_unsubscribe(worker_data.sensor_correction_sub);
 
 	/* give this message enough time to propagate */
-	px4_usleep(600000);
+	usleep(600000);
 
 	return res;
 }

@@ -39,8 +39,6 @@
 
 #pragma once
 
-#include <drivers/device/Device.hpp>
-
 #define ADDR_ID_A			0x0a
 #define ADDR_ID_B			0x0b
 #define ADDR_ID_C			0x0c

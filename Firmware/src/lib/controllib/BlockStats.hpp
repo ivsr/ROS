@@ -39,7 +39,7 @@
 
 #pragma once
 
-#include <px4_platform_common/defines.h>
+#include <px4_defines.h>
 #include <assert.h>
 #include <time.h>
 #include <stdlib.h>
@@ -67,7 +67,7 @@ public:
 		_sumSq(),
 		_count(0)
 	{}
-	virtual ~BlockStats() = default;
+	virtual ~BlockStats() {}
 	void update(const matrix::Vector<Type, M> &u)
 	{
 		_sum += u;
@@ -89,7 +89,7 @@ public:
 	}
 	matrix::Vector<Type, M> getStdDev()
 	{
-		return getVar().sqrt();
+		return getVar().pow(0.5);
 	}
 private:
 // attributes

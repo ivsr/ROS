@@ -46,8 +46,8 @@
  * @author Thomas Gubler <thomasgubler@gmail.com>
  */
 
-#include <px4_platform_common/px4_config.h>
-#include <px4_platform_common/defines.h>
+#include <px4_config.h>
+#include <px4_defines.h>
 
 #include <drivers/device/i2c.h>
 
@@ -61,9 +61,8 @@
 #include <stdio.h>
 #include <ctype.h>
 #include <math.h>
-#include <px4_platform_common/getopt.h>
 
-#include <px4_platform_common/px4_work_queue/ScheduledWorkItem.hpp>
+#include <nuttx/wqueue.h>
 #include <nuttx/clock.h>
 
 #include <perf/perf_counter.h>
@@ -109,13 +108,11 @@
 				     */
 #define PCA9685_SCALE ((PCA9685_PWMMAX - PCA9685_PWMCENTER)/(M_DEG_TO_RAD_F * PCA9685_MAXSERVODEG)) // scales from rad to PWM
 
-using namespace time_literals;
-
-class PCA9685 : public device::I2C, public px4::ScheduledWorkItem
+class PCA9685 : public device::I2C
 {
 public:
 	PCA9685(int bus = PCA9685_BUS, uint8_t address = ADDR);
-	virtual ~PCA9685() = default;
+	virtual ~PCA9685();
 
 
 	virtual int		init();
@@ -125,10 +122,12 @@ public:
 	bool			is_running() { return _running; }
 
 private:
+	work_s			_work;
+
 
 	enum IOX_MODE		_mode;
 	bool			_running;
-	uint64_t			_i2cpwm_interval;
+	int			_i2cpwm_interval;
 	bool			_should_run;
 	perf_counter_t		_comms_errors;
 
@@ -141,7 +140,8 @@ private:
 
 	bool _mode_on_initialized;  /** Set to true after the first call of i2cpwm in mode IOX_MODE_ON */
 
-	void			Run() override;
+	static void		i2cpwm_trampoline(void *arg);
+	void			i2cpwm();
 
 	/**
 	 * Helper function to set the pwm frequency
@@ -184,18 +184,22 @@ extern "C" __EXPORT int pca9685_main(int argc, char *argv[]);
 
 PCA9685::PCA9685(int bus, uint8_t address) :
 	I2C("pca9685", PCA9685_DEVICE_PATH, bus, address, 100000),
-	ScheduledWorkItem(MODULE_NAME, px4::device_bus_to_wq(get_device_id())),
 	_mode(IOX_MODE_OFF),
 	_running(false),
-	_i2cpwm_interval(1_s / 60.0f),
+	_i2cpwm_interval(SEC2TICK(1.0f / 60.0f)),
 	_should_run(false),
 	_comms_errors(perf_alloc(PC_COUNT, "pca9685_com_err")),
 	_actuator_controls_sub(-1),
 	_actuator_controls(),
 	_mode_on_initialized(false)
 {
+	memset(&_work, 0, sizeof(_work));
 	memset(_msg, 0, sizeof(_msg));
 	memset(_current_values, 0, sizeof(_current_values));
+}
+
+PCA9685::~PCA9685()
+{
 }
 
 int
@@ -253,7 +257,7 @@ PCA9685::ioctl(struct file *filp, int cmd, unsigned long arg)
 		// if not active, kick it
 		if (!_running) {
 			_running = true;
-			ScheduleNow();
+			work_queue(LPWORK, &_work, (worker_t)&PCA9685::i2cpwm_trampoline, this, 1);
 		}
 
 
@@ -283,11 +287,19 @@ PCA9685::info()
 	return ret;
 }
 
+void
+PCA9685::i2cpwm_trampoline(void *arg)
+{
+	PCA9685 *i2cpwm = reinterpret_cast<PCA9685 *>(arg);
+
+	i2cpwm->i2cpwm();
+}
+
 /**
  * Main loop function
  */
 void
-PCA9685::Run()
+PCA9685::i2cpwm()
 {
 	if (_mode == IOX_MODE_TEST_OUT) {
 		setPin(0, PCA9685_PWMCENTER);
@@ -322,6 +334,7 @@ PCA9685::Run()
 					     (double)_actuator_controls.control[i]);
 
 				if (new_value != _current_values[i] &&
+				    isfinite(new_value) &&
 				    new_value >= PCA9685_PWMMIN &&
 				    new_value <= PCA9685_PWMMAX) {
 					/* This value was updated, send the command to adjust the PWM value */
@@ -342,7 +355,7 @@ PCA9685::Run()
 
 	// re-queue ourselves to run again later
 	_running = true;
-	ScheduleDelayed(_i2cpwm_interval);
+	work_queue(LPWORK, &_work, (worker_t)&PCA9685::i2cpwm_trampoline, this, _i2cpwm_interval);
 }
 
 int
@@ -522,20 +535,17 @@ pca9685_main(int argc, char *argv[])
 	int i2cdevice = -1;
 	int i2caddr = ADDR; // 7bit
 
-	int myoptind = 1;
 	int ch;
-	const char *myoptarg = nullptr;
-
 
 	// jump over start/off/etc and look at options first
-	while ((ch = px4_getopt(argc, argv, "a:b:", &myoptind, &myoptarg)) != EOF) {
+	while ((ch = getopt(argc, argv, "a:b:")) != EOF) {
 		switch (ch) {
 		case 'a':
-			i2caddr = strtol(myoptarg, NULL, 0);
+			i2caddr = strtol(optarg, NULL, 0);
 			break;
 
 		case 'b':
-			i2cdevice = strtol(myoptarg, NULL, 0);
+			i2cdevice = strtol(optarg, NULL, 0);
 			break;
 
 		default:
@@ -544,12 +554,12 @@ pca9685_main(int argc, char *argv[])
 		}
 	}
 
-	if (myoptind >= argc) {
+	if (optind >= argc) {
 		pca9685_usage();
-		exit(0);
+		exit(1);
 	}
 
-	const char *verb = argv[myoptind];
+	const char *verb = argv[optind];
 
 	int fd;
 	int ret;

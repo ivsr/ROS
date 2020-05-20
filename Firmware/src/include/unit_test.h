@@ -35,7 +35,7 @@
 #ifndef UNIT_TEST_H_
 #define UNIT_TEST_H_
 
-#include <px4_platform_common/log.h>
+#include <px4_log.h>
 
 #define ut_declare_test_c(test_function, test_class)	\
 	extern "C" {										\
@@ -45,7 +45,6 @@
 			test_class* test = new test_class();		\
 			bool success = test->run_tests();			\
 			test->print_results();						\
-			delete test;                                              \
 			return success ? 0 : -1;					\
 		}												\
 	}
@@ -106,7 +105,6 @@ protected:
 			_tests_passed++;			\
 		}						\
 		_cleanup();					\
-		printf("\n");				\
 	} while (0)
 
 /// @brief Used to assert a value within a unit test.

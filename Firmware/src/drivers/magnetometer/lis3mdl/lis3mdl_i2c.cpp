@@ -37,7 +37,7 @@
  * I2C interface for LIS3MDL
  */
 
-#include <px4_platform_common/px4_config.h>
+#include <px4_config.h>
 
 #include <assert.h>
 #include <debug.h>
@@ -65,8 +65,9 @@ class LIS3MDL_I2C : public device::I2C
 {
 public:
 	LIS3MDL_I2C(int bus);
-	virtual ~LIS3MDL_I2C() = default;
+	virtual ~LIS3MDL_I2C();
 
+	virtual int     init();
 	virtual int     ioctl(unsigned operation, unsigned &arg);
 	virtual int     read(unsigned address, void *data, unsigned count);
 	virtual int     write(unsigned address, void *data, unsigned count);
@@ -89,6 +90,17 @@ LIS3MDL_I2C::LIS3MDL_I2C(int bus) :
 	I2C("LIS3MDL_I2C", nullptr, bus, LIS3MDLL_ADDRESS, 400000)
 {
 	_device_id.devid_s.devtype = DRV_MAG_DEVTYPE_LIS3MDL;
+}
+
+LIS3MDL_I2C::~LIS3MDL_I2C()
+{
+}
+
+int
+LIS3MDL_I2C::init()
+{
+	/* this will call probe() */
+	return I2C::init();
 }
 
 int

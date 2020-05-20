@@ -36,18 +36,13 @@ px4_add_git_submodule(TARGET git_gps_devices PATH "devices")
 px4_add_module(
 	MODULE drivers__gps
 	MAIN gps
-	COMPILE_FLAGS
-		-Wno-cast-align # TODO: fix and enable
+	STACK_MAIN 1200
 	SRCS
 		gps.cpp
 		devices/src/gps_helper.cpp
 		devices/src/mtk.cpp
 		devices/src/ashtech.cpp
 		devices/src/ubx.cpp
-		devices/src/rtcm.cpp
-		devices/src/emlid_reach.cpp
-	MODULE_CONFIG
-		module.yaml
 	DEPENDS
 		git_gps_devices
 	)

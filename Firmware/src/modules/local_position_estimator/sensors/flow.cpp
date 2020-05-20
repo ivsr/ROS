@@ -10,6 +10,9 @@ extern orb_advert_t mavlink_log_pub;
 static const uint32_t		REQ_FLOW_INIT_COUNT = 10;
 static const uint32_t		FLOW_TIMEOUT = 1000000;	// 1 s
 
+// minimum flow altitude
+static const float flow_min_agl = 0.3;
+
 void BlockLocalPositionEstimator::flowInit()
 {
 	// measure
@@ -33,22 +36,20 @@ void BlockLocalPositionEstimator::flowInit()
 
 int BlockLocalPositionEstimator::flowMeasure(Vector<float, n_y_flow> &y)
 {
-	matrix::Eulerf euler(matrix::Quatf(_sub_att.get().q));
-
 	// check for sane pitch/roll
-	if (euler.phi() > 0.5f || euler.theta() > 0.5f) {
+	if (_eul(0) > 0.5f || _eul(1) > 0.5f) {
 		return -1;
 	}
 
 	// check for agl
-	if (agl() < _sub_flow.get().min_ground_distance) {
+	if (agl() < flow_min_agl) {
 		return -1;
 	}
 
 	// check quality
 	float qual = _sub_flow.get().quality;
 
-	if (qual < _param_lpe_flw_qmin.get()) {
+	if (qual < _flow_min_q.get()) {
 		return -1;
 	}
 
@@ -57,12 +58,14 @@ int BlockLocalPositionEstimator::flowMeasure(Vector<float, n_y_flow> &y)
 		return -1;
 	}
 
+	matrix::Eulerf euler = matrix::Quatf(_sub_att.get().q);
+
 	float d = agl() * cosf(euler.phi()) * cosf(euler.theta());
 
 	// optical flow in x, y axis
 	// TODO consider making flow scale a states of the kalman filter
-	float flow_x_rad = _sub_flow.get().pixel_flow_x_integral * _param_lpe_flw_scale.get();
-	float flow_y_rad = _sub_flow.get().pixel_flow_y_integral * _param_lpe_flw_scale.get();
+	float flow_x_rad = _sub_flow.get().pixel_flow_x_integral * _flow_scale.get();
+	float flow_y_rad = _sub_flow.get().pixel_flow_y_integral * _flow_scale.get();
 	float dt_flow = _sub_flow.get().integration_timespan / 1.0e6f;
 
 	if (dt_flow > 0.5f || dt_flow < 1.0e-6f) {
@@ -73,7 +76,7 @@ int BlockLocalPositionEstimator::flowMeasure(Vector<float, n_y_flow> &y)
 	float gyro_x_rad = 0;
 	float gyro_y_rad = 0;
 
-	if (_param_lpe_fusion.get() & FUSE_FLOW_GYRO_COMP) {
+	if (_fusion.get() & FUSE_FLOW_GYRO_COMP) {
 		gyro_x_rad = _flow_gyro_x_high_pass.update(
 				     _sub_flow.get().gyro_x_rate_integral);
 		gyro_y_rad = _flow_gyro_y_high_pass.update(
@@ -152,30 +155,28 @@ void BlockLocalPositionEstimator::flowCorrect()
 	// compute polynomial value
 	float flow_vxy_stddev = p[0] * h + p[1] * h * h + p[2] * v + p[3] * v * h + p[4] * v * h * h;
 
-	const Vector3f rates{_sub_angular_velocity.get().xyz};
-	float rotrate_sq = rates(0) * rates(0)
-			   + rates(1) * rates(1)
-			   + rates(2) * rates(2);
+	float rotrate_sq = _sub_att.get().rollspeed * _sub_att.get().rollspeed
+			   + _sub_att.get().pitchspeed * _sub_att.get().pitchspeed
+			   + _sub_att.get().yawspeed * _sub_att.get().yawspeed;
 
-	matrix::Eulerf euler(matrix::Quatf(_sub_att.get().q));
-	float rot_sq = euler.phi() * euler.phi() + euler.theta() * euler.theta();
+	float rot_sq = _eul(0) * _eul(0) + _eul(1) * _eul(1);
 
 	R(Y_flow_vx, Y_flow_vx) = flow_vxy_stddev * flow_vxy_stddev +
-				  _param_lpe_flw_r.get() * _param_lpe_flw_r.get() * rot_sq +
-				  _param_lpe_flw_rr.get() * _param_lpe_flw_rr.get() * rotrate_sq;
+				  _flow_r.get() * _flow_r.get() * rot_sq +
+				  _flow_rr.get() * _flow_rr.get() * rotrate_sq;
 	R(Y_flow_vy, Y_flow_vy) = R(Y_flow_vx, Y_flow_vx);
 
 	// residual
 	Vector<float, 2> r = y - C * _x;
 
 	// residual covariance
-	Matrix<float, n_y_flow, n_y_flow> S = C * m_P * C.transpose() + R;
+	Matrix<float, n_y_flow, n_y_flow> S = C * _P * C.transpose() + R;
 
 	// publish innovations
-	_pub_innov.get().flow[0] = r(0);
-	_pub_innov.get().flow[1] = r(1);
-	_pub_innov_var.get().flow[0] = S(0, 0);
-	_pub_innov_var.get().flow[1] = S(1, 1);
+	_pub_innov.get().flow_innov[0] = r(0);
+	_pub_innov.get().flow_innov[1] = r(1);
+	_pub_innov.get().flow_innov_var[0] = S(0, 0);
+	_pub_innov.get().flow_innov_var[1] = S(1, 1);
 
 	// residual covariance, (inverse)
 	Matrix<float, n_y_flow, n_y_flow> S_I = inv<float, n_y_flow>(S);
@@ -196,10 +197,10 @@ void BlockLocalPositionEstimator::flowCorrect()
 
 	if (!(_sensorFault & SENSOR_FLOW)) {
 		Matrix<float, n_x, n_y_flow> K =
-			m_P * C.transpose() * S_I;
+			_P * C.transpose() * S_I;
 		Vector<float, n_x> dx = K * r;
 		_x += dx;
-		m_P -= K * C * m_P;
+		_P -= K * C * _P;
 	}
 }
 

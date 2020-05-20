@@ -39,13 +39,12 @@
  * Based on the hmc5883 driver.
  */
 
-#include <px4_platform_common/time.h>
 #include "lis3mdl.h"
 
 LIS3MDL::LIS3MDL(device::Device *interface, const char *path, enum Rotation rotation) :
 	CDev("LIS3MDL", path),
-	ScheduledWorkItem(MODULE_NAME, px4::device_bus_to_wq(interface->get_device_id())),
 	_interface(interface),
+	_work{},
 	_reports(nullptr),
 	_scale{},
 	_last_report{},
@@ -58,7 +57,7 @@ LIS3MDL::LIS3MDL(device::Device *interface, const char *path, enum Rotation rota
 	_continuous_mode_set(false),
 	_mode(CONTINUOUS),
 	_rotation(rotation),
-	_measure_interval(0),
+	_measure_ticks(0),
 	_class_instance(-1),
 	_orb_class_instance(-1),
 	_range_ga(4.0f),
@@ -80,6 +79,9 @@ LIS3MDL::LIS3MDL(device::Device *interface, const char *path, enum Rotation rota
 	_device_id.devid_s.address = _interface->get_device_address();
 	_device_id.devid_s.devtype = DRV_MAG_DEVTYPE_LIS3MDL;
 
+	// enable debug() calls
+	_debug_enabled = false;
+
 	// default scaling
 	_scale.x_offset = 0;
 	_scale.x_scale = 1.0f;
@@ -87,16 +89,15 @@ LIS3MDL::LIS3MDL(device::Device *interface, const char *path, enum Rotation rota
 	_scale.y_scale = 1.0f;
 	_scale.z_offset = 0;
 	_scale.z_scale = 1.0f;
+
+	// work_cancel in the dtor will explode if we don't do this...
+	memset(&_work, 0, sizeof(_work));
 }
 
 LIS3MDL::~LIS3MDL()
 {
 	/* make sure we are truly inactive */
 	stop();
-
-	if (_mag_topic != nullptr) {
-		orb_unadvertise(_mag_topic);
-	}
 
 	if (_reports != nullptr) {
 		delete _reports;
@@ -141,7 +142,7 @@ LIS3MDL::calibrate(struct file *file_pointer, unsigned enable)
 		goto out;
 	}
 
-	px4_usleep(20000);
+	usleep(20000);
 
 	/* discard 10 samples to let the sensor settle */
 	for (uint8_t i = 0; i < num_samples; i++) {
@@ -206,7 +207,7 @@ LIS3MDL::calibrate(struct file *file_pointer, unsigned enable)
 		goto out;
 	}
 
-	px4_usleep(60000);
+	usleep(60000);
 
 	/* discard 10 samples to let the sensor settle */
 	for (uint8_t i = 0; i < num_samples; i++) {
@@ -280,9 +281,25 @@ out:
 	set_range(4);
 	set_default_register_values();
 
-	px4_usleep(20000);
+	usleep(20000);
 
 	return ret;
+}
+
+int
+LIS3MDL::check_calibration()
+{
+	bool offset_valid = (check_offset() == OK);
+	bool scale_valid  = (check_scale() == OK);
+
+	if (_calibrated != (offset_valid && scale_valid)) {
+		PX4_WARN("mag cal status changed %s%s", (scale_valid) ? "" : "scale invalid ",
+			 (offset_valid) ? "" : "offset invalid");
+		_calibrated = (offset_valid && scale_valid);
+	}
+
+	/* return 0 if calibrated, 1 else */
+	return !_calibrated;
 }
 
 int
@@ -355,14 +372,15 @@ LIS3MDL::collect()
 
 	new_mag_report.timestamp = hrt_absolute_time();
 	new_mag_report.error_count = perf_event_count(_comms_errors);
+	new_mag_report.range_ga = _range_ga;
 	new_mag_report.scaling = _range_scale;
 	new_mag_report.device_id = _device_id.devid;
 
 	ret = _interface->read(ADDR_OUT_X_L, (uint8_t *)&lis_report, sizeof(lis_report));
 
 	/**
-	 * Silicon Bug: the X axis will be read instead of the temperature registers if you do a sequential read through XYZ.
-	 * The temperature registers must be addressed directly.
+	 * Weird behavior: the X axis will be read instead of the temperature registers if you use a pointer to a packed struct...not sure why.
+	 * This works now, but further investigation to determine why this happens would be good (I am guessing a type error somewhere)
 	 */
 	ret = _interface->read(ADDR_OUT_T_L, (uint8_t *)&buf_rx, sizeof(buf_rx));
 
@@ -438,10 +456,10 @@ LIS3MDL::collect()
 }
 
 void
-LIS3MDL::Run()
+LIS3MDL::cycle()
 {
-	/* _measure_interval == 0  is used as _task_should_exit */
-	if (_measure_interval == 0) {
+	/* _measure_ticks == 0  is used as _task_should_exit */
+	if (_measure_ticks == 0) {
 		return;
 	}
 
@@ -458,10 +476,22 @@ LIS3MDL::Run()
 		DEVICE_DEBUG("measure error");
 	}
 
-	if (_measure_interval > 0) {
+	if (_measure_ticks > 0) {
 		/* schedule a fresh cycle call when the measurement is done */
-		ScheduleDelayed(LIS3MDL_CONVERSION_INTERVAL);
+		work_queue(HPWORK,
+			   &_work,
+			   (worker_t)&LIS3MDL::cycle_trampoline,
+			   this,
+			   USEC2TICK(LIS3MDL_CONVERSION_INTERVAL));
 	}
+}
+
+void
+LIS3MDL::cycle_trampoline(void *arg)
+{
+	LIS3MDL *dev = (LIS3MDL *)arg;
+
+	dev->cycle();
 }
 
 int
@@ -500,16 +530,22 @@ LIS3MDL::ioctl(struct file *file_pointer, int cmd, unsigned long arg)
 	case SENSORIOCSPOLLRATE: {
 			switch (arg) {
 
+			/* switching to manual polling */
+			case SENSOR_POLLRATE_MANUAL:
+				stop();
+				_measure_ticks = 0;
+				return PX4_OK;
+
 			/* zero would be bad */
 			case 0:
 				return -EINVAL;
 
 			case SENSOR_POLLRATE_DEFAULT: {
 					/* do we need to start internal polling? */
-					bool not_started = (_measure_interval == 0);
+					bool not_started = (_measure_ticks == 0);
 
 					/* set interval for next measurement to minimum legal value */
-					_measure_interval = (LIS3MDL_CONVERSION_INTERVAL);
+					_measure_ticks = USEC2TICK(LIS3MDL_CONVERSION_INTERVAL);
 
 					/* if we need to start the poll state machine, do it */
 					if (not_started) {
@@ -522,13 +558,13 @@ LIS3MDL::ioctl(struct file *file_pointer, int cmd, unsigned long arg)
 			/* Uses arg (hz) for a custom poll rate */
 			default: {
 					/* do we need to start internal polling? */
-					bool not_started = (_measure_interval == 0);
+					bool not_started = (_measure_ticks == 0);
 
 					/* convert hz to tick interval via microseconds */
-					unsigned interval = (1000000 / arg);
+					unsigned ticks = USEC2TICK(1000000 / arg);
 
 					/* update interval for next measurement */
-					_measure_interval = interval;
+					_measure_ticks = ticks;
 
 					/* if we need to start the poll state machine, do it */
 					if (not_started) {
@@ -540,15 +576,46 @@ LIS3MDL::ioctl(struct file *file_pointer, int cmd, unsigned long arg)
 			}
 		}
 
+	case SENSORIOCSQUEUEDEPTH: {
+			/* lower bound is mandatory, upper bound is a sanity check */
+			if ((arg < 1) || (arg > 100)) {
+				return -EINVAL;
+			}
+
+			irqstate_t flags = px4_enter_critical_section();
+
+			if (!_reports->resize(arg)) {
+				px4_leave_critical_section(flags);
+				return -ENOMEM;
+			}
+
+			px4_leave_critical_section(flags);
+
+			return PX4_OK;
+		}
+
 	case SENSORIOCRESET:
 		return reset();
+
+	case MAGIOCSSAMPLERATE:
+		/* same as pollrate because device is in single measurement mode*/
+		return ioctl(file_pointer, SENSORIOCSPOLLRATE, arg);
+
+	case MAGIOCGSAMPLERATE:
+		/* same as pollrate because device is in single measurement mode*/
+		return 1000000 / TICK2USEC(_measure_ticks);
 
 	case MAGIOCSRANGE:
 		return set_range(arg);
 
+	case MAGIOCGRANGE:
+		return _range_ga;
+
 	case MAGIOCSSCALE:
 		/* set new scale factors */
 		memcpy(&_scale, (struct mag_calibration_s *)arg, sizeof(_scale));
+		/* check calibration, but not actually return an error */
+		(void)check_calibration();
 		return 0;
 
 	case MAGIOCGSCALE:
@@ -556,11 +623,16 @@ LIS3MDL::ioctl(struct file *file_pointer, int cmd, unsigned long arg)
 		memcpy((struct mag_calibration_s *)arg, &_scale, sizeof(_scale));
 		return 0;
 
+
 	case MAGIOCCALIBRATE:
 		return calibrate(file_pointer, arg);
 
 	case MAGIOCEXSTRAP:
 		return set_excitement(arg);
+
+	case MAGIOCSELFTEST:
+		return check_calibration();
+
 
 	case MAGIOCGEXTERNAL:
 		DEVICE_DEBUG("MAGIOCGEXTERNAL in main driver");
@@ -603,7 +675,7 @@ LIS3MDL::print_info()
 {
 	perf_print_counter(_sample_perf);
 	perf_print_counter(_comms_errors);
-	PX4_INFO("poll interval:  %u", _measure_interval);
+	PX4_INFO("poll interval:  %u ticks", _measure_ticks);
 	print_message(_last_report);
 	_reports->print_info("report queue");
 }
@@ -641,7 +713,7 @@ LIS3MDL::read(struct file *file_pointer, char *buffer, size_t buffer_len)
 	}
 
 	/* if automatic measurement is enabled */
-	if (_measure_interval > 0) {
+	if (_measure_ticks > 0) {
 		/*
 		 * While there is space in the caller's buffer, and reports, copy them.
 		 * Note that we may be pre-empted by the workq thread while we are doing this;
@@ -670,7 +742,7 @@ LIS3MDL::read(struct file *file_pointer, char *buffer, size_t buffer_len)
 		}
 
 		/* wait for it to complete */
-		px4_usleep(LIS3MDL_CONVERSION_INTERVAL);
+		usleep(LIS3MDL_CONVERSION_INTERVAL);
 
 		/* run the collection phase */
 		if (collect() != OK) {
@@ -790,16 +862,16 @@ LIS3MDL::start()
 	set_default_register_values();
 
 	/* schedule a cycle to start things */
-	ScheduleNow();
+	work_queue(HPWORK, &_work, (worker_t)&LIS3MDL::cycle_trampoline, this, 1);
 }
 
 void
 LIS3MDL::stop()
 {
-	if (_measure_interval > 0) {
+	if (_measure_ticks > 0) {
 		/* ensure no new items are queued while we cancel this one */
-		_measure_interval = 0;
-		ScheduleClear();
+		_measure_ticks = 0;
+		work_cancel(HPWORK, &_work);
 	}
 }
 

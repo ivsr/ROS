@@ -38,10 +38,24 @@
  * Driver for the Eagle Tree Airspeed V3 connected via I2C.
  */
 
-#include <float.h>
+#include <cfloat>
 
+#include <px4_config.h>
+
+#include <drivers/device/i2c.h>
+
+#include <systemlib/err.h>
+#include <parameters/param.h>
+#include <perf/perf_counter.h>
+#include <px4_getopt.h>
+
+#include <drivers/drv_airspeed.h>
+#include <drivers/drv_hrt.h>
+#include <drivers/device/ringbuffer.h>
+
+#include <uORB/uORB.h>
+#include <uORB/topics/differential_pressure.h>
 #include <drivers/airspeed/airspeed.h>
-#include <px4_platform_common/getopt.h>
 
 /* I2C bus address */
 #define I2C_ADDRESS	0x75	/* 7-bit address. 8-bit address is 0xEA */
@@ -70,9 +84,9 @@ protected:
 	* Perform a poll cycle; collect from the previous measurement
 	* and start a new one.
 	*/
-	void	Run() override;
-	int	measure() override;
-	int	collect() override;
+	virtual void	cycle();
+	virtual int	measure();
+	virtual int	collect();
 
 };
 
@@ -124,7 +138,7 @@ ETSAirspeed::collect()
 
 	float diff_pres_pa_raw = (float)(val[1] << 8 | val[0]);
 
-	differential_pressure_s report{};
+	differential_pressure_s report;
 	report.timestamp = hrt_absolute_time();
 
 	if (diff_pres_pa_raw < FLT_EPSILON) {
@@ -147,7 +161,10 @@ ETSAirspeed::collect()
 	report.temperature = -1000.0f;
 	report.device_id = _device_id.devid;
 
-	_airspeed_pub.publish(report);
+	if (_airspeed_pub != nullptr && !(_pub_blocked)) {
+		/* publish it */
+		orb_publish(ORB_ID(differential_pressure), _airspeed_pub, &report);
+	}
 
 	ret = OK;
 
@@ -157,7 +174,7 @@ ETSAirspeed::collect()
 }
 
 void
-ETSAirspeed::Run()
+ETSAirspeed::cycle()
 {
 	int ret;
 
@@ -181,10 +198,14 @@ ETSAirspeed::Run()
 		/*
 		 * Is there a collect->measure gap?
 		 */
-		if (_measure_interval > CONVERSION_INTERVAL) {
+		if (_measure_ticks > USEC2TICK(CONVERSION_INTERVAL)) {
 
 			/* schedule a fresh cycle call when we are ready to measure again */
-			ScheduleDelayed(_measure_interval - CONVERSION_INTERVAL);
+			work_queue(HPWORK,
+				   &_work,
+				   (worker_t)&Airspeed::cycle_trampoline,
+				   this,
+				   _measure_ticks - USEC2TICK(CONVERSION_INTERVAL));
 
 			return;
 		}
@@ -203,7 +224,11 @@ ETSAirspeed::Run()
 	_collect_phase = true;
 
 	/* schedule a fresh cycle call when the measurement is done */
-	ScheduleDelayed(CONVERSION_INTERVAL);
+	work_queue(HPWORK,
+		   &_work,
+		   (worker_t)&Airspeed::cycle_trampoline,
+		   this,
+		   USEC2TICK(CONVERSION_INTERVAL));
 }
 
 /**
@@ -212,43 +237,21 @@ ETSAirspeed::Run()
 namespace ets_airspeed
 {
 
-ETSAirspeed	*g_dev = nullptr;
+ETSAirspeed	*g_dev;
 
-int start();
-int start_bus(int i2c_bus);
+int start(int i2c_bus);
 int stop();
 int reset();
 int info();
 
 /**
- * Attempt to start driver on all available I2C busses.
- *
- * This function will return as soon as the first sensor
- * is detected on one of the available busses or if no
- * sensors are detected.
- *
- */
-int
-start()
-{
-	for (unsigned i = 0; i < NUM_I2C_BUS_OPTIONS; i++) {
-		if (start_bus(i2c_bus_options[i]) == PX4_OK) {
-			return PX4_OK;
-		}
-	}
-
-	return PX4_ERROR;
-
-}
-
-/**
- * Start the driver on a specific bus.
+ * Start the driver.
  *
  * This function only returns if the sensor is up and running
  * or could not be detected successfully.
  */
 int
-start_bus(int i2c_bus)
+start(int i2c_bus)
 {
 	int fd;
 
@@ -287,6 +290,8 @@ fail:
 		delete g_dev;
 		g_dev = nullptr;
 	}
+
+	PX4_WARN("not started on bus %d", i2c_bus);
 
 	return PX4_ERROR;
 }
@@ -344,7 +349,6 @@ ets_airspeed_usage()
 	PX4_INFO("usage: ets_airspeed command [options]");
 	PX4_INFO("options:");
 	PX4_INFO("\t-b --bus i2cbus (%d)", PX4_I2C_BUS_DEFAULT);
-	PX4_INFO("\t-a --all");
 	PX4_INFO("command:");
 	PX4_INFO("\tstart|stop|reset|info");
 }
@@ -357,16 +361,11 @@ ets_airspeed_main(int argc, char *argv[])
 	int myoptind = 1;
 	int ch;
 	const char *myoptarg = nullptr;
-	bool start_all = false;
 
-	while ((ch = px4_getopt(argc, argv, "ab:", &myoptind, &myoptarg)) != EOF) {
+	while ((ch = px4_getopt(argc, argv, "b:", &myoptind, &myoptarg)) != EOF) {
 		switch (ch) {
 		case 'b':
 			i2c_bus = atoi(myoptarg);
-			break;
-
-		case 'a':
-			start_all = true;
 			break;
 
 		default:
@@ -384,12 +383,7 @@ ets_airspeed_main(int argc, char *argv[])
 	 * Start/load the driver.
 	 */
 	if (!strcmp(argv[myoptind], "start")) {
-		if (start_all) {
-			return ets_airspeed::start();
-
-		} else {
-			return ets_airspeed::start_bus(i2c_bus);
-		}
+		return ets_airspeed::start(i2c_bus);
 	}
 
 	/*

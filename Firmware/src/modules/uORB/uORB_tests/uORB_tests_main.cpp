@@ -32,7 +32,7 @@
  ****************************************************************************/
 
 #include <string.h>
-#include "../uORBDeviceNode.hpp"
+#include "../uORBDevices.hpp"
 #include "../uORB.h"
 #include "../uORBCommon.hpp"
 
@@ -61,11 +61,13 @@ uorb_tests_main(int argc, char *argv[])
 		int rc = t.test();
 
 		if (rc == OK) {
-			PX4_INFO("PASS");
+			fprintf(stdout, "  [uORBTest] \t\tPASS\n");
+			fflush(stdout);
 			return 0;
 
 		} else {
-			PX4_ERR("FAIL");
+			fprintf(stderr, "  [uORBTest] \t\tFAIL\n");
+			fflush(stderr);
 			return -1;
 		}
 	}

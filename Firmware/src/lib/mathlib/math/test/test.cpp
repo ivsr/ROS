@@ -41,8 +41,6 @@
 #include <math.h>
 #include <stdlib.h>
 
-#include <px4_platform_common/defines.h>
-
 #include "test.hpp"
 
 bool __EXPORT equal(float a, float b, float epsilon)
@@ -108,7 +106,7 @@ void __EXPORT float2SigExp(
 // FIXME - This code makes no sense when exp is an int
 // FIXME - isnan and isinf not defined for QuRT
 #ifndef __PX4_QURT
-	if (!PX4_ISFINITE(num)) {
+	if (isnan(num) || isinf(num)) {
 		sig = 0.0f;
 		exp = -99;
 		return;

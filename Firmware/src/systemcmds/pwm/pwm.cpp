@@ -37,14 +37,13 @@
  * PWM servo output configuration and monitoring tool.
  */
 
-#include <px4_platform_common/px4_config.h>
-#include <px4_platform_common/tasks.h>
-#include <px4_platform_common/posix.h>
-#include <px4_platform_common/getopt.h>
-#include <px4_platform_common/defines.h>
-#include <px4_platform_common/log.h>
-#include <px4_platform_common/module.h>
-#include <px4_platform_common/cli.h>
+#include <px4_config.h>
+#include <px4_tasks.h>
+#include <px4_posix.h>
+#include <px4_getopt.h>
+#include <px4_defines.h>
+#include <px4_log.h>
+#include <px4_module.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -116,12 +115,9 @@ $ pwm test -c 13 -p 1200
 	PRINT_MODULE_USAGE_COMMAND_DESCR("disarm", "Disarm output");
 
 	PRINT_MODULE_USAGE_COMMAND_DESCR("info", "Print current configuration of all channels");
-	PRINT_MODULE_USAGE_COMMAND_DESCR("forcefail", "Force Failsafe mode. "
-                                         "PWM outputs are set to failsafe values.");
+	PRINT_MODULE_USAGE_COMMAND_DESCR("forcefail", "Force Failsafe mode");
 	PRINT_MODULE_USAGE_ARG("on|off", "Turn on or off", false);
-	PRINT_MODULE_USAGE_COMMAND_DESCR("terminatefail", "Enable Termination Failsafe mode. "
-                                         "While this is true, "
-                                         "any failsafe that occurs will be unrecoverable (even if recovery conditions are met).");
+	PRINT_MODULE_USAGE_COMMAND_DESCR("terminatefail", "Force Termination Failsafe mode");
 	PRINT_MODULE_USAGE_ARG("on|off", "Turn on or off", false);
 
 	PRINT_MODULE_USAGE_COMMAND_DESCR("rate", "Configure PWM rates");
@@ -139,14 +135,14 @@ $ pwm test -c 13 -p 1200
 
 
 	PRINT_MODULE_USAGE_PARAM_COMMENT("The commands 'failsafe', 'disarmed', 'min', 'max' and 'test' require a PWM value:");
-	PRINT_MODULE_USAGE_PARAM_INT('p', -1, 0, 4000, "PWM value (eg. 1100)", false);
+	PRINT_MODULE_USAGE_PARAM_INT('p', 0, 0, 4000, "PWM value (eg. 1100)", false);
 
 	PRINT_MODULE_USAGE_PARAM_COMMENT("The commands 'rate', 'oneshot', 'failsafe', 'disarmed', 'min', 'max', 'test' and 'steps' "
 					 "additionally require to specify the channels with one of the following commands:");
 	PRINT_MODULE_USAGE_PARAM_STRING('c', nullptr, nullptr, "select channels in the form: 1234 (1 digit per channel, 1=first)",
 					true);
-	PRINT_MODULE_USAGE_PARAM_INT('m', -1, 0, 4096, "Select channels via bitmask (eg. 0xF, 3)", true);
-	PRINT_MODULE_USAGE_PARAM_INT('g', -1, 0, 10, "Select channels by group (eg. 0, 1, 2. use 'pwm info' to show groups)",
+	PRINT_MODULE_USAGE_PARAM_INT('m', 0, 0, 4096, "Select channels via bitmask (eg. 0xF, 3)", true);
+	PRINT_MODULE_USAGE_PARAM_INT('g', 0, 0, 10, "Select channels by group (eg. 0, 1, 2. use 'pwm info' to show groups)",
 				     true);
 	PRINT_MODULE_USAGE_PARAM_FLAG('a', "Select all channels", true);
 
@@ -155,6 +151,49 @@ $ pwm test -c 13 -p 1200
 	PRINT_MODULE_USAGE_PARAM_FLAG('v', "Verbose output", true);
 	PRINT_MODULE_USAGE_PARAM_FLAG('e', "Exit with 1 instead of 0 on error", true);
 
+}
+
+static unsigned
+get_parameter_value(const char *option, const char *paramDescription)
+{
+	unsigned result_value = 0;
+
+	/* check if this is a param name */
+	if (strncmp("p:", option, 2) == 0) {
+
+		char paramName[32];
+		strncpy(paramName, option + 2, 17);
+		/* user wants to use a param name */
+		param_t parm = param_find(paramName);
+
+		if (parm != PARAM_INVALID) {
+			int32_t pwm_parm;
+			int gret = param_get(parm, &pwm_parm);
+
+			if (gret == 0) {
+				result_value = pwm_parm;
+
+			} else {
+				PX4_ERR("PARAM '%s' LOAD FAIL", paramDescription);
+				return gret;
+			}
+
+		} else {
+			PX4_ERR("PARAM '%s' NAME NOT FOUND", paramName);
+			return 1;
+		}
+
+	} else {
+		char *ep;
+		result_value = strtoul(option, &ep, 0);
+
+		if (*ep != '\0') {
+			PX4_ERR("BAD '%s'", paramDescription);
+			return 1;
+		}
+	}
+
+	return result_value;
 }
 
 int
@@ -169,7 +208,6 @@ pwm_main(int argc, char *argv[])
 	bool oneshot = false;
 	int ch;
 	int ret;
-	int rv = 1;
 	char *ep;
 	uint32_t set_mask = 0;
 	unsigned group;
@@ -249,17 +287,11 @@ pwm_main(int argc, char *argv[])
 			break;
 
 		case 'p':
-			if (px4_get_parameter_value(myoptarg, pwm_value) != 0) {
-				PX4_ERR("CLI argument parsing for PWM value failed");
-				return 1;
-			}
+			pwm_value = get_parameter_value(myoptarg, "PWM Value");
 			break;
 
 		case 'r':
-			if (px4_get_parameter_value(myoptarg, alt_rate) != 0) {
-				PX4_ERR("CLI argument parsing for PWM rate failed");
-				return 1;
-			}
+			alt_rate = get_parameter_value(myoptarg, "PWM Rate");
 			break;
 
 		default:
@@ -406,16 +438,14 @@ pwm_main(int argc, char *argv[])
 			return 1;
 		}
 
-		if (pwm_value < 0) {
-			return 0;
-		}
-
 		if (pwm_value == 0) {
 			usage("min: no PWM value provided");
 			return 1;
 		}
 
-		struct pwm_output_values pwm_values {};
+		struct pwm_output_values pwm_values;
+
+		memset(&pwm_values, 0, sizeof(pwm_values));
 
 		pwm_values.channel_count = servo_count;
 
@@ -460,16 +490,14 @@ pwm_main(int argc, char *argv[])
 			return 1;
 		}
 
-		if (pwm_value < 0) {
-			return 0;
-		}
-
 		if (pwm_value == 0) {
 			usage("no PWM value provided");
 			return 1;
 		}
 
-		struct pwm_output_values pwm_values {};
+		struct pwm_output_values pwm_values;
+
+		memset(&pwm_values, 0, sizeof(pwm_values));
 
 		pwm_values.channel_count = servo_count;
 
@@ -522,7 +550,9 @@ pwm_main(int argc, char *argv[])
 			PX4_WARN("reading disarmed value of zero, disabling disarmed PWM");
 		}
 
-		struct pwm_output_values pwm_values {};
+		struct pwm_output_values pwm_values;
+
+		memset(&pwm_values, 0, sizeof(pwm_values));
 
 		pwm_values.channel_count = servo_count;
 
@@ -567,16 +597,14 @@ pwm_main(int argc, char *argv[])
 			return 1;
 		}
 
-		if (pwm_value < 0) {
-			return 0;
-		}
-
 		if (pwm_value == 0) {
 			usage("failsafe: no PWM provided");
 			return 1;
 		}
 
-		struct pwm_output_values pwm_values {};
+		struct pwm_output_values pwm_values;
+
+		memset(&pwm_values, 0, sizeof(pwm_values));
 
 		pwm_values.channel_count = servo_count;
 
@@ -647,11 +675,6 @@ pwm_main(int argc, char *argv[])
 		fds.fd = 0; /* stdin */
 		fds.events = POLLIN;
 
-		if (::ioctl(fd, PWM_SERVO_SET_MODE, PWM_SERVO_ENTER_TEST_MODE) < 0) {
-				PX4_ERR("Failed to Enter pwm test mode");
-				goto err_out_no_test;
-		}
-
 		PX4_INFO("Press CTRL-C or 'c' to abort.");
 
 		while (1) {
@@ -661,7 +684,7 @@ pwm_main(int argc, char *argv[])
 
 					if (ret != OK) {
 						PX4_ERR("PWM_SERVO_SET(%d)", i);
-						goto err_out;
+						return 1;
 					}
 				}
 			}
@@ -682,20 +705,19 @@ pwm_main(int argc, char *argv[])
 
 							if (ret != OK) {
 								PX4_ERR("PWM_SERVO_SET(%d)", i);
-								goto err_out;
+								return 1;
 							}
 						}
 					}
 
 					PX4_INFO("User abort\n");
-					rv = 0;
-					goto err_out;
+					return 0;
 				}
 			}
 
 			/* Delay longer than the max Oneshot duration */
 
-			px4_usleep(2542);
+			usleep(2542);
 
 #ifdef __PX4_NUTTX
 			/* Trigger all timer's channels in Oneshot mode to fire
@@ -705,15 +727,8 @@ pwm_main(int argc, char *argv[])
 			up_pwm_update();
 #endif
 		}
-		rv = 0;
-err_out:
-			if (::ioctl(fd, PWM_SERVO_SET_MODE, PWM_SERVO_EXIT_TEST_MODE) < 0) {
-					rv = 1;
-					PX4_ERR("Failed to Exit pwm test mode");
-			}
 
-err_out_no_test:
-		return rv;
+		return 0;
 
 
 	} else if (!strcmp(command, "steps")) {
@@ -744,12 +759,7 @@ err_out_no_test:
 		fds.events = POLLIN;
 
 		PX4_WARN("Running 5 steps. WARNING! Motors will be live in 5 seconds\nPress any key to abort now.");
-		px4_sleep(5);
-
-		if (::ioctl(fd, PWM_SERVO_SET_MODE, PWM_SERVO_ENTER_TEST_MODE) < 0) {
-				PX4_ERR("Failed to Enter pwm test mode");
-				goto err_out_no_test;
-		}
+		sleep(5);
 
 		unsigned off = 900;
 		unsigned idle = 1300;
@@ -787,7 +797,7 @@ err_out_no_test:
 
 						if (ret != OK) {
 							PX4_ERR("PWM_SERVO_SET(%d)", i);
-							goto err_out;
+							return 1;
 						}
 					}
 				}
@@ -808,25 +818,24 @@ err_out_no_test:
 
 								if (ret != OK) {
 									PX4_ERR("PWM_SERVO_SET(%d)", i);
-									goto err_out;
+									return 1;
 								}
 							}
 						}
 
 						PX4_INFO("User abort\n");
-						rv = 0;
-						goto err_out;
+						return 0;
 					}
 				}
 
 				if (phase == 1) {
-					px4_usleep(steps_timings_us[steps_timing_index] / phase_maxcount);
+					usleep(steps_timings_us[steps_timing_index] / phase_maxcount);
 
 				} else if (phase == 0) {
-					px4_usleep(50000);
+					usleep(50000);
 
 				} else if (phase == 2) {
-					px4_usleep(50000);
+					usleep(50000);
 
 				} else {
 					break;
@@ -841,8 +850,7 @@ err_out_no_test:
 			}
 		}
 
-		rv = 0;
-		goto err_out;
+		return 0;
 
 
 	} else if (!strcmp(command, "info")) {

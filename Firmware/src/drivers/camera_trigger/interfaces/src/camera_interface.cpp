@@ -1,5 +1,5 @@
 #include "camera_interface.h"
-#include <px4_platform_common/log.h>
+#include <px4_log.h>
 
 /**
  * @file camera_interface.cpp
@@ -11,6 +11,8 @@ CameraInterface::CameraInterface():
 	_pins{}
 {
 }
+
+CameraInterface::~CameraInterface() = default;
 
 void CameraInterface::get_pins()
 {

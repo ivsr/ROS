@@ -39,12 +39,9 @@
 
 #pragma once
 
-#include <px4_platform_common/module_params.h>
+#include <px4_module_params.h>
 
 #include "mission_block.h"
-
-#include <uORB/Publication.hpp>
-#include <uORB/topics/vehicle_attitude_setpoint.h>
 
 class Navigator;
 
@@ -60,10 +57,10 @@ public:
 
 private:
 	DEFINE_PARAMETERS(
-		(ParamFloat<px4::params::NAV_GPSF_LT>) _param_nav_gpsf_lt,
-		(ParamFloat<px4::params::NAV_GPSF_R>) _param_nav_gpsf_r,
-		(ParamFloat<px4::params::NAV_GPSF_P>) _param_nav_gpsf_p,
-		(ParamFloat<px4::params::NAV_GPSF_TR>) _param_nav_gpsf_tr
+		(ParamFloat<px4::params::NAV_GPSF_LT>) _param_loitertime,
+		(ParamFloat<px4::params::NAV_GPSF_R>) _param_openlooploiter_roll,
+		(ParamFloat<px4::params::NAV_GPSF_P>) _param_openlooploiter_pitch,
+		(ParamFloat<px4::params::NAV_GPSF_TR>) _param_openlooploiter_thrust
 	)
 
 	enum GPSFState {
@@ -75,8 +72,8 @@ private:
 
 	hrt_abstime _timestamp_activation{0}; //*< timestamp when this mode was activated */
 
-	uORB::Publication<vehicle_attitude_setpoint_s>	_att_sp_pub{ORB_ID(vehicle_attitude_setpoint)};
-	uORB::Publication<vehicle_attitude_setpoint_s>	_fw_virtual_att_sp_pub{ORB_ID(fw_virtual_attitude_setpoint)};
+	orb_advert_t	_att_sp_pub{nullptr};
+
 	/**
 	 * Set the GPSF item
 	 */

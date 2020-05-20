@@ -1,18 +1,16 @@
 set(SITL_WORKING_DIR ${PX4_BINARY_DIR}/tmp)
 file(MAKE_DIRECTORY ${SITL_WORKING_DIR})
-file(MAKE_DIRECTORY ${SITL_WORKING_DIR}/rootfs)
 
 # add a symlink to the logs dir to make it easier to find them
 add_custom_command(OUTPUT ${PX4_BINARY_DIR}/logs
-		COMMAND ${CMAKE_COMMAND} -E create_symlink ${SITL_WORKING_DIR}/rootfs/log logs
+		COMMAND ${CMAKE_COMMAND} -E create_symlink ${SITL_WORKING_DIR}/rootfs/fs/microsd/log logs
 		WORKING_DIRECTORY ${PX4_BINARY_DIR})
 add_custom_target(logs_symlink DEPENDS ${PX4_BINARY_DIR}/logs)
-
-add_dependencies(px4 logs_symlink)
 
 add_custom_target(run_config
 		COMMAND Tools/sitl_run.sh
 			$<TARGET_FILE:px4>
+			${config_sitl_rcS_dir}
 			${config_sitl_debugger}
 			${config_sitl_viewer}
 			${config_sitl_model}
@@ -32,27 +30,24 @@ include(ExternalProject)
 # project to build sitl_gazebo if necessary
 ExternalProject_Add(sitl_gazebo
 	SOURCE_DIR ${PX4_SOURCE_DIR}/Tools/sitl_gazebo
-	CMAKE_ARGS
-		-DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}
-		-DSEND_VISION_ESTIMATION_DATA=ON
+	CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}
 	BINARY_DIR ${PX4_BINARY_DIR}/build_gazebo
 	INSTALL_COMMAND ""
 	DEPENDS
 		git_gazebo
-	USES_TERMINAL_CONFIGURE true
-	USES_TERMINAL_BUILD true
-	EXCLUDE_FROM_ALL true
-	BUILD_ALWAYS 1
-)
+	)
+set_target_properties(sitl_gazebo PROPERTIES EXCLUDE_FROM_ALL TRUE)
+
+ExternalProject_Add_Step(sitl_gazebo forceconfigure
+	DEPENDEES update
+	DEPENDERS configure
+	ALWAYS 1
+	)
 
 # create targets for each viewer/model/debugger combination
-set(viewers none jmavsim gazebo)
+set(viewers none jmavsim gazebo replay)
 set(debuggers none ide gdb lldb ddd valgrind callgrind)
-set(models none shell
-	if750a iris iris_opt_flow iris_vision iris_rplidar iris_irlock iris_obs_avoid iris_rtps solo typhoon_h480
-	plane
-	standard_vtol tailsitter tiltrotor
-	hippocampus rover)
+set(models none iris iris_opt_flow iris_vision iris_rplidar iris_irlock standard_vtol plane solo tailsitter typhoon_h480 rover hippocampus tiltrotor)
 set(all_posix_vmd_make_targets)
 foreach(viewer ${viewers})
 	foreach(debugger ${debuggers})
@@ -74,6 +69,7 @@ foreach(viewer ${viewers})
 			add_custom_target(${_targ_name}
 					COMMAND ${PX4_SOURCE_DIR}/Tools/sitl_run.sh
 						$<TARGET_FILE:px4>
+						${config_sitl_rcS_dir}
 						${debugger}
 						${viewer}
 						${model}
@@ -94,13 +90,9 @@ foreach(viewer ${viewers})
 	endforeach()
 endforeach()
 
-string(REPLACE ";" "," posix_vmd_make_target_list "${all_posix_vmd_make_targets}")
-
+px4_join(OUT posix_vmd_make_target_list LIST ${all_posix_vmd_make_targets} GLUE "\\n")
 add_custom_target(list_vmd_make_targets
 	COMMAND sh -c "printf \"${posix_vmd_make_target_list}\\n\""
-	COMMENT "List of acceptable '${PX4_BOARD}' <viewer_model_debugger> targets:"
+	COMMENT "List of acceptable '${CONFIG}' <viewer_model_debugger> targets:"
 	VERBATIM
 	)
-
-# vscode launch.json
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/Debug/launch.json.in ${PX4_SOURCE_DIR}/.vscode/launch.json COPYONLY)

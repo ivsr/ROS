@@ -33,13 +33,44 @@
 
 #include "module.h"
 
-#include <px4_platform_common/getopt.h>
-#include <px4_platform_common/log.h>
-#include <px4_platform_common/posix.h>
+#include <px4_getopt.h>
+#include <px4_log.h>
+#include <px4_posix.h>
 
 #include <uORB/topics/parameter_update.h>
 #include <uORB/topics/sensor_combined.h>
 
+
+int Module::print_usage(const char *reason)
+{
+	if (reason) {
+		PX4_WARN("%s\n", reason);
+	}
+
+	PRINT_MODULE_DESCRIPTION(
+		R"DESCR_STR(
+### Description
+Section that describes the provided module functionality.
+
+This is a template for a module running as a task in the background with start/stop/status functionality.
+
+### Implementation
+Section describing the high-level implementation of this module.
+
+### Examples
+CLI usage example:
+$ module start -f -p 42
+
+)DESCR_STR");
+
+	PRINT_MODULE_USAGE_NAME("module", "template");
+	PRINT_MODULE_USAGE_COMMAND("start");
+	PRINT_MODULE_USAGE_PARAM_FLAG('f', "Optional example flag", true);
+	PRINT_MODULE_USAGE_PARAM_INT('p', 0, 0, 1000, "Optional example parameter", true);
+	PRINT_MODULE_USAGE_DEFAULT_COMMANDS();
+
+	return 0;
+}
 
 int Module::print_status()
 {
@@ -145,7 +176,8 @@ void Module::run()
 	fds[0].events = POLLIN;
 
 	// initialize parameters
-	parameters_update(true);
+	int parameter_update_sub = orb_subscribe(ORB_ID(parameter_update));
+	parameters_update(parameter_update_sub, true);
 
 	while (!should_exit()) {
 
@@ -158,7 +190,7 @@ void Module::run()
 		} else if (pret < 0) {
 			// this is undesirable but not much we can do
 			PX4_ERR("poll error %d, %d", pret, errno);
-			px4_usleep(50000);
+			usleep(50000);
 			continue;
 
 		} else if (fds[0].revents & POLLIN) {
@@ -169,55 +201,30 @@ void Module::run()
 
 		}
 
-		parameters_update();
+
+		parameters_update(parameter_update_sub);
 	}
 
 	orb_unsubscribe(sensor_combined_sub);
+	orb_unsubscribe(parameter_update_sub);
 }
 
-void Module::parameters_update(bool force)
+void Module::parameters_update(int parameter_update_sub, bool force)
 {
-	// check for parameter updates
-	if (_parameter_update_sub.updated() || force) {
-		// clear update
-		parameter_update_s update;
-		_parameter_update_sub.copy(&update);
+	bool updated;
+	struct parameter_update_s param_upd;
 
-		// update parameters from storage
+	orb_check(parameter_update_sub, &updated);
+
+	if (updated) {
+		orb_copy(ORB_ID(parameter_update), parameter_update_sub, &param_upd);
+	}
+
+	if (force || updated) {
 		updateParams();
 	}
 }
 
-int Module::print_usage(const char *reason)
-{
-	if (reason) {
-		PX4_WARN("%s\n", reason);
-	}
-
-	PRINT_MODULE_DESCRIPTION(
-		R"DESCR_STR(
-### Description
-Section that describes the provided module functionality.
-
-This is a template for a module running as a task in the background with start/stop/status functionality.
-
-### Implementation
-Section describing the high-level implementation of this module.
-
-### Examples
-CLI usage example:
-$ module start -f -p 42
-
-)DESCR_STR");
-
-	PRINT_MODULE_USAGE_NAME("module", "template");
-	PRINT_MODULE_USAGE_COMMAND("start");
-	PRINT_MODULE_USAGE_PARAM_FLAG('f', "Optional example flag", true);
-	PRINT_MODULE_USAGE_PARAM_INT('p', 0, 0, 1000, "Optional example parameter", true);
-	PRINT_MODULE_USAGE_DEFAULT_COMMANDS();
-
-	return 0;
-}
 
 int module_main(int argc, char *argv[])
 {

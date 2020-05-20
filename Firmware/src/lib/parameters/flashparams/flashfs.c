@@ -42,8 +42,8 @@
  * foot print device.
  */
 
-#include <px4_platform_common/defines.h>
-#include <px4_platform_common/posix.h>
+#include <px4_defines.h>
+#include <px4_posix.h>
 #include <crc32.h>
 #include <stddef.h>
 #include <string.h>
@@ -54,8 +54,6 @@
 #include "flashfs.h"
 #include <nuttx/compiler.h>
 #include <nuttx/progmem.h>
-
-#if defined(CONFIG_ARCH_HAVE_PROGMEM)
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -647,11 +645,11 @@ static sector_descriptor_t *get_sector_info(flash_entry_header_t *current)
 static int erase_sector(sector_descriptor_t *sm, flash_entry_header_t *pf)
 {
 	int rv = 0;
-	ssize_t block = up_progmem_getpage((size_t)pf);
+	ssize_t page = up_progmem_getpage((size_t)pf);
 
-	if (block > 0 && block == sm->page) {
+	if (page > 0 && page == sm->page) {
 		last_erased = sm->page;
-		ssize_t size = up_progmem_eraseblock(block);
+		ssize_t size = up_progmem_erasepage(page);
 
 		if (size < 0 || size != (ssize_t)sm->size) {
 			rv = size;
@@ -1118,4 +1116,3 @@ __EXPORT void test(void)
 	free(buffer);
 }
 #endif /* FLASH_UNIT_TEST */
-#endif /* CONFIG_ARCH_HAVE_PROGMEM */

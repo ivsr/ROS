@@ -33,13 +33,8 @@
 px4_add_module(
 	MODULE drivers__imu__adis16477
 	MAIN adis16477
-	COMPILE_FLAGS
-		-Wno-cast-align # TODO: fix and enable
 	SRCS
 		ADIS16477.cpp
-		adis16477_main.cpp
-	DEPENDS
-		px4_work_queue
-		drivers_accelerometer
-		drivers_gyroscope
+		ADIS16477_gyro.cpp
+		ADIS16477_main.cpp
 	)

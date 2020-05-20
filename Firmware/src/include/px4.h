@@ -39,6 +39,7 @@
 
 #pragma once
 
+#include "../platforms/px4_includes.h"
 #include "../platforms/px4_defines.h"
 #ifdef __cplusplus
 #include "../platforms/px4_middleware.h"

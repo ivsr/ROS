@@ -38,13 +38,24 @@
 
 #include "led.h"
 
+int LedController::init(int led_control_sub)
+{
+	_led_control_sub = led_control_sub;
+	_last_update_call = hrt_absolute_time();
+	return 0;
+}
+
 int LedController::update(LedControlData &control_data)
 {
-	while (_led_control_sub.updated() || _force_update) {
+	bool updated = false;
+
+	orb_check(_led_control_sub, &updated);
+
+	while (updated || _force_update) {
 		// handle new state
 		led_control_s led_control;
 
-		if (_led_control_sub.copy(&led_control)) {
+		if (orb_copy(ORB_ID(led_control), _led_control_sub, &led_control) == 0) {
 
 			// don't apply the new state just yet to avoid interrupting an ongoing blinking state
 			for (int i = 0; i < BOARD_MAX_LEDS; ++i) {
@@ -69,18 +80,14 @@ int LedController::update(LedControlData &control_data)
 		}
 
 		_force_update = false;
+
+		orb_check(_led_control_sub, &updated);
 	}
 
 	bool had_changes = false; // did one of the outputs change?
 
 	// handle state updates
 	hrt_abstime now = hrt_absolute_time();
-
-	if (_last_update_call == 0) {
-		_last_update_call = now;
-		return 0;
-	}
-
 	uint16_t blink_delta_t = (uint16_t)((now - _last_update_call) / 100); // Note: this is in 0.1ms
 	constexpr uint16_t breathe_duration = BREATHE_INTERVAL * BREATHE_STEPS / 100;
 

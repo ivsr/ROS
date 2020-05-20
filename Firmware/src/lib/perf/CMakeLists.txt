@@ -31,5 +31,5 @@
 #
 ############################################################################
 
-add_library(perf perf_counter.cpp)
+add_library(perf perf_counter.c)
 add_dependencies(perf prebuild_targets)

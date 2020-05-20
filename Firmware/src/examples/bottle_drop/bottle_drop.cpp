@@ -40,8 +40,8 @@
  * @author Julian Oes <joes@student.ethz.ch>
  */
 
-#include <px4_platform_common/px4_config.h>
-#include <px4_platform_common/tasks.h>
+#include <px4_config.h>
+#include <px4_tasks.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,7 +55,7 @@
 #include <drivers/device/device.h>
 #include <drivers/drv_hrt.h>
 #include <arch/board/board.h>
-#include <uORB/Subscription.hpp>
+#include <uORB/uORB.h>
 #include <uORB/topics/vehicle_command.h>
 #include <uORB/topics/actuator_controls.h>
 #include <uORB/topics/wind_estimate.h>
@@ -206,7 +206,7 @@ BottleDrop::~BottleDrop()
 
 		do {
 			/* wait 20ms */
-			px4_usleep(20000);
+			usleep(20000);
 
 			/* if we have given up, kill it */
 			if (++i > 50) {
@@ -222,6 +222,8 @@ BottleDrop::~BottleDrop()
 int
 BottleDrop::start()
 {
+	ASSERT(_main_task == -1);
+
 	/* start the task */
 	_main_task = px4_task_spawn_cmd("bottle_drop",
 					SCHED_DEFAULT,
@@ -259,7 +261,7 @@ BottleDrop::open_bay()
 
 	actuators_publish();
 
-	px4_usleep(500 * 1000);
+	usleep(500 * 1000);
 }
 
 void
@@ -274,7 +276,7 @@ BottleDrop::close_bay()
 	actuators_publish();
 
 	// delay until the bay is closed
-	px4_usleep(500 * 1000);
+	usleep(500 * 1000);
 }
 
 void
@@ -290,7 +292,7 @@ BottleDrop::drop()
 	}
 
 	while (hrt_elapsed_time(&_doors_opened) < 500 * 1000 && hrt_elapsed_time(&starttime) < 2000000) {
-		px4_usleep(50000);
+		usleep(50000);
 		warnx("delayed by door!");
 	}
 
@@ -302,7 +304,7 @@ BottleDrop::drop()
 	warnx("dropping now");
 
 	// Give it time to drop
-	px4_usleep(1000 * 1000);
+	usleep(1000 * 1000);
 }
 
 void
@@ -411,7 +413,9 @@ BottleDrop::task_main()
 
 	int vehicle_global_position_sub = orb_subscribe(ORB_ID(vehicle_global_position));
 
-	uORB::Subscription parameter_update_sub{ORB_ID(parameter_update)};
+	struct parameter_update_s update;
+	memset(&update, 0, sizeof(update));
+	int parameter_update_sub = orb_subscribe(ORB_ID(parameter_update));
 
 	struct mission_item_s flight_vector_s {};
 	struct mission_item_s flight_vector_e {};
@@ -490,11 +494,12 @@ BottleDrop::task_main()
 				orb_copy(ORB_ID(vehicle_global_position), vehicle_global_position_sub, &_global_pos);
 			}
 
-			// check for parameter updates
-			if (parameter_update_sub.updated()) {
-				// clear update
-				parameter_update_s pupdate;
-				parameter_update_sub.copy(&pupdate);
+			// Get parameter updates
+			orb_check(parameter_update_sub, &updated);
+
+			if (updated) {
+				// copy global position
+				orb_copy(ORB_ID(parameter_update), parameter_update_sub, &update);
 
 				// update all parameters
 				param_get(param_gproperties, &z_0);
@@ -633,7 +638,7 @@ BottleDrop::task_main()
 
 					float approach_direction = get_bearing_to_next_waypoint(flight_vector_s.lat, flight_vector_s.lon, flight_vector_e.lat,
 								   flight_vector_e.lon);
-					mavlink_log_critical(&_mavlink_log_pub, "position set, approach heading: %u",
+					mavlink_log_critical(&_mavlink_log_pub, "position set, approach heading: %u", (unsigned)distance_real,
 							     (unsigned)math::degrees(approach_direction + M_PI_F));
 
 					_drop_state = DROP_STATE_TARGET_SET;
@@ -723,7 +728,7 @@ BottleDrop::task_main()
 			// update_actuators();
 
 			// run at roughly 100 Hz
-			px4_usleep(sleeptime_us);
+			usleep(sleeptime_us);
 
 			dt_runs = hrt_elapsed_time(&last_run) / 1e6f;
 			last_run = hrt_absolute_time();
