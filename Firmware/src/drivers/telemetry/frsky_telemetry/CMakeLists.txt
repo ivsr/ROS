@@ -33,12 +33,12 @@
 px4_add_module(
 	MODULE drivers__frsky_telemetry
 	MAIN frsky_telemetry
-	STACK_MAIN 1200
 	COMPILE_FLAGS
 	SRCS
 		frsky_data.cpp
 		sPort_data.cpp
 		frsky_telemetry.cpp
-	DEPENDS
+	MODULE_CONFIG
+		module.yaml
 	)
 

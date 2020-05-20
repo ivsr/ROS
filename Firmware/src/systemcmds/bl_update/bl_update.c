@@ -34,12 +34,12 @@
 /**
  * @file bl_update.c
  *
- * STM32F4 bootloader update tool.
+ * STM32F4 & STM32F7 bootloader update tool.
  */
 
-#include <px4_config.h>
-#include <px4_log.h>
-#include <px4_module.h>
+#include <px4_platform_common/px4_config.h>
+#include <px4_platform_common/log.h>
+#include <px4_platform_common/module.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,12 +53,19 @@
 
 #include <nuttx/progmem.h>
 
-
-#define BL_FILE_SIZE_LIMIT	16384
+#if defined(CONFIG_ARCH_CHIP_STM32H7)
+#  define BL_FILE_SIZE_LIMIT	128*1024
+#  define STM_RAM_BASE        STM32_AXISRAM_BASE
+#else
+#  define BL_FILE_SIZE_LIMIT  16384
+#  define STM_RAM_BASE        STM32_SRAM_BASE
+#endif
 
 __EXPORT int bl_update_main(int argc, char *argv[]);
 
-#if defined (CONFIG_STM32_STM32F4XXX)
+#if defined (CONFIG_STM32_STM32F4XXX) || defined (CONFIG_ARCH_CHIP_STM32F7) || \
+    defined (CONFIG_ARCH_CHIP_STM32H7)
+
 static int setopt(void);
 
 static void print_usage(const char *reason)
@@ -75,12 +82,14 @@ static void print_usage(const char *reason)
 	PRINT_MODULE_USAGE_COMMAND_DESCR("<file>", "Bootloader bin file");
 }
 
-#endif
+#endif // defined (CONFIG_STM32_STM32F4XXX) || defined (CONFIG_ARCH_CHIP_STM32F7)
+
 
 int
 bl_update_main(int argc, char *argv[])
 {
-#if !defined (CONFIG_STM32_STM32F4XXX)
+#if !(defined (CONFIG_STM32_STM32F4XXX) || defined (CONFIG_ARCH_CHIP_STM32F7) \
+    || defined (CONFIG_ARCH_CHIP_STM32H7))
 	PX4_ERR("Not supported on this HW");
 	return 1;
 }
@@ -143,8 +152,8 @@ bl_update_main(int argc, char *argv[])
 
 	uint32_t *hdr = (uint32_t *)buf;
 
-	if ((hdr[0] < 0x20000000) ||			/* stack not below RAM */
-	    (hdr[0] > (0x20000000 + (128 * 1024))) ||	/* stack not above RAM */
+	if ((hdr[0] < STM_RAM_BASE) ||			/* stack not below RAM */
+	    (hdr[0] > (STM_RAM_BASE + (128 * 1024))) ||	/* stack not above RAM */
 	    (hdr[1] < PX4_FLASH_BASE) ||			/* entrypoint not below flash */
 	    ((hdr[1] - PX4_FLASH_BASE) > BL_FILE_SIZE_LIMIT))  		/* entrypoint not outside bootloader */
 	{
@@ -154,7 +163,7 @@ bl_update_main(int argc, char *argv[])
 	}
 
 	PX4_INFO("image validated, erasing bootloader...");
-	usleep(10000);
+	px4_usleep(10000);
 
 	/* prevent other tasks from running while we do this */
 	sched_lock();
@@ -162,11 +171,11 @@ bl_update_main(int argc, char *argv[])
 	const size_t page = 0;
 	uint8_t *base = (uint8_t *) PX4_FLASH_BASE;
 
-	ssize_t size = up_progmem_erasepage(page);
+	ssize_t size = up_progmem_eraseblock(page);
 
 	if (size != BL_FILE_SIZE_LIMIT)
 	{
-		PX4_ERR("erase error at 0x%08x", &base[size]);
+		PX4_ERR("erase error at %p", &base[size]);
 	}
 
 	PX4_INFO("flashing...");
@@ -177,7 +186,7 @@ bl_update_main(int argc, char *argv[])
 
 	if (size != s.st_size)
 	{
-		PX4_ERR("program error at 0x%0x8",  &base[size]);
+		PX4_ERR("program error at %p",  &base[size]);
 		goto flash_end;
 	}
 
@@ -191,7 +200,7 @@ bl_update_main(int argc, char *argv[])
 	for (int i = 0; i < s.st_size; i++)
 	{
 		if (base[i] != buf[i]) {
-			PX4_WARN("verify failed at %u - retry update, DO NOT reboot", i);
+			PX4_WARN("verify failed at %i - retry update, DO NOT reboot", i);
 			goto flash_end;
 		}
 	}
@@ -232,14 +241,14 @@ setopt(void)
 	/* program the new option value */
 	*optcr = (*optcr & ~opt_mask) | opt_bits | (1 << 1);
 
-	usleep(1000);
+	px4_usleep(1000);
 
 	if ((*optcr & opt_mask) == opt_bits) {
 		PX4_INFO("option bits set");
 		return 0;
 	}
 
-	PX4_ERR("option bits setting failed; readback 0x%04x", *optcr);
+	PX4_ERR("option bits setting failed; readback 0x%04" PRIx32, *optcr);
 	return 1;
 }
-#endif // CONFIG_STM32_STM32F4XXX
+#endif // defined (CONFIG_STM32_STM32F4XXX) || defined (CONFIG_ARCH_CHIP_STM32F7)

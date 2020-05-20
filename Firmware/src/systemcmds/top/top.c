@@ -39,7 +39,7 @@
  * @author Lorenz Meier <lorenz@px4.io>
  */
 
-#include <px4_config.h>
+#include <px4_platform_common/px4_config.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <stdbool.h>
@@ -50,7 +50,7 @@
 #include <systemlib/cpuload.h>
 #include <systemlib/printload.h>
 #include <drivers/drv_hrt.h>
-#include <px4_module.h>
+#include <px4_platform_common/module.h>
 
 /**
  * Start the top application.
@@ -80,7 +80,7 @@ top_main(int argc, char *argv[])
 	if (argc > 1) {
 		if (!strcmp(argv[1], "once")) {
 			print_load(curr_time, 1, &load);
-			sleep(1);
+			px4_sleep(1);
 			print_load(hrt_absolute_time(), 1, &load);
 
 		} else {
@@ -121,7 +121,7 @@ top_main(int argc, char *argv[])
 				}
 			}
 
-			usleep(200000);
+			px4_usleep(200000);
 		}
 
 		curr_time = hrt_absolute_time();

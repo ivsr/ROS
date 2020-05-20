@@ -309,7 +309,7 @@ __EXPORT void		param_reset_excludes(const char *excludes[], int num_excludes);
  * Export changed parameters to a file.
  * Note: this method requires a large amount of stack size!
  *
- * @param fd		File descriptor to export to.
+ * @param fd		File descriptor to export to (-1 selects the FLASH storage).
  * @param only_unsaved	Only export changed parameters that have not yet been exported.
  * @return		Zero on success, nonzero on failure.
  */
@@ -320,7 +320,7 @@ __EXPORT int		param_export(int fd, bool only_unsaved);
  *
  * This function merges the imported parameters with the current parameter set.
  *
- * @param fd		File descriptor to import from.  (Currently expected to be a file.)
+ * @param fd		File descriptor to import from (-1 selects the FLASH storage).
  * @return		Zero on success, nonzero if an error occurred during import.
  *			Note that in the failure case, parameters may be inconsistent.
  */
@@ -332,7 +332,7 @@ __EXPORT int		param_import(int fd);
  * This function resets all parameters to their default values, then loads new
  * values from a file.
  *
- * @param fd		File descriptor to import from.  (Currently expected to be a file.)
+ * @param fd		File descriptor to import from (-1 selects the FLASH storage).
  * @return		Zero on success, nonzero if an error occurred during import.
  *			Note that in the failure case, parameters may be inconsistent.
  */
@@ -349,15 +349,16 @@ __EXPORT int		param_load(int fd);
  * @param arg		Argument passed to the function.
  * @param only_changed	If true, the function is only called for parameters whose values have
  *			been changed from the default.
- * @param only_changed	If true, the function is only called for parameters which have been
+ * @param only_used	If true, the function is only called for parameters which have been
  *			used in one of the running applications.
  */
 __EXPORT void		param_foreach(void (*func)(void *arg, param_t param), void *arg, bool only_changed, bool only_used);
 
 /**
  * Set the default parameter file name.
+ * This has no effect if the FLASH-based storage is enabled.
  *
- * @param filename	Path to the default parameter file.  The file is not require to
+ * @param filename	Path to the default parameter file.  The file is not required to
  *			exist.
  * @return		Zero on success.
  */
@@ -396,6 +397,11 @@ __EXPORT int 		param_load_default(void);
  */
 __EXPORT uint32_t	param_hash_check(void);
 
+/**
+ * Print the status of the param system
+ *
+ */
+__EXPORT void	param_print_status(void);
 
 /**
  * Enable/disable the param autosaving.
@@ -403,27 +409,6 @@ __EXPORT uint32_t	param_hash_check(void);
  * @param enable true: enable autosaving, false: disable autosaving
  */
 __EXPORT void	param_control_autosave(bool enable);
-
-/*
- * Macros creating static parameter definitions.
- *
- * Note that these structures are not known by name; they are
- * collected into a section that is iterated by the parameter
- * code.
- *
- * Note that these macros cannot be used in C++ code due to
- * their use of designated initializers.  They should probably
- * be refactored to avoid the use of a union for param_value_u.
- */
-
-/** define an int32 parameter */
-#define PARAM_DEFINE_INT32(_name, _default)
-
-/** define a float parameter */
-#define PARAM_DEFINE_FLOAT(_name, _default)
-
-/** define a parameter that points to a structure */
-#define PARAM_DEFINE_STRUCT(_name, _default)
 
 /**
  * Parameter value union.
@@ -482,20 +467,17 @@ __END_DECLS
 // param is a C-interface. This means there is no overloading, and thus no type-safety for param_get().
 // So for C++ code we redefine param_get() to inlined overloaded versions, which gives us type-safety
 // w/o having to use a different interface
-static inline int param_get_cplusplus(param_t param, float *val)
+static inline int param_get(param_t param, float *val)
 {
 	CHECK_PARAM_TYPE(param, PARAM_TYPE_FLOAT);
-	return param_get(param, val);
+	return param_get(param, (void *)val);
 }
-static inline int param_get_cplusplus(param_t param, int32_t *val)
+static inline int param_get(param_t param, int32_t *val)
 {
 	CHECK_PARAM_TYPE(param, PARAM_TYPE_INT32);
-	return param_get(param, val);
+	return param_get(param, (void *)val);
 }
 #undef CHECK_PARAM_TYPE
-
-#define param_get(param, val) param_get_cplusplus(param, val)
-
 
 #endif /* __cplusplus */
 

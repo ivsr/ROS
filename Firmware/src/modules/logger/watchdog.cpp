@@ -33,7 +33,11 @@
 
 #include "watchdog.h"
 
-#include <px4_log.h>
+#include <px4_platform_common/log.h>
+
+#if defined(__PX4_NUTTX) && !defined(CONFIG_SCHED_INSTRUMENTATION)
+#  error watchdog support requires CONFIG_SCHED_INSTRUMENTATION
+#endif
 
 using namespace time_literals;
 

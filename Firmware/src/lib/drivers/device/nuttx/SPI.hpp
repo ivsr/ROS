@@ -32,7 +32,7 @@
  ****************************************************************************/
 
 /**
- * @file spi.h
+ * @file SPI.hpp
  *
  * Base class for devices connected via SPI.
  */
@@ -42,8 +42,6 @@
 
 #include "../CDev.hpp"
 
-#include <px4_spi.h>
-
 namespace device __EXPORT
 {
 
@@ -52,6 +50,13 @@ namespace device __EXPORT
  */
 class __EXPORT SPI : public CDev
 {
+public:
+	// no copy, assignment, move, move assignment
+	SPI(const SPI &) = delete;
+	SPI &operator=(const SPI &) = delete;
+	SPI(SPI &&) = delete;
+	SPI &operator=(SPI &&) = delete;
+
 protected:
 	/**
 	 * Constructor
@@ -63,12 +68,7 @@ protected:
 	 * @param mode		SPI clock/data mode
 	 * @param frequency	SPI clock frequency
 	 */
-	SPI(const char *name,
-	    const char *devname,
-	    int bus,
-	    uint32_t device,
-	    enum spi_mode_e mode,
-	    uint32_t frequency);
+	SPI(const char *name, const char *devname, int bus, uint32_t device, enum spi_mode_e mode, uint32_t frequency);
 	virtual ~SPI();
 
 	/**
@@ -80,7 +80,7 @@ protected:
 		LOCK_NONE		/**< perform no locking, only safe if the bus is entirely private */
 	};
 
-	virtual int	init();
+	virtual int	init() override;
 
 	/**
 	 * Check for the presence of the device on the bus.
@@ -139,6 +139,7 @@ protected:
 	 * @param frequency	Frequency to set (Hz)
 	 */
 	void		set_frequency(uint32_t frequency) { _frequency = frequency; }
+	uint32_t	get_frequency() { return _frequency; }
 
 	/**
 	 * Set the SPI bus locking mode
@@ -148,26 +149,22 @@ protected:
 	 *
 	 * @param mode	Locking mode
 	 */
-	void		set_lockmode(enum LockMode mode) { locking_mode = mode; }
-
-	LockMode	locking_mode;	/**< selected locking mode */
+	void		set_lockmode(enum LockMode mode) { _locking_mode = mode; }
 
 private:
-	uint32_t			_device;
+	uint32_t		_device;
 	enum spi_mode_e		_mode;
 	uint32_t		_frequency;
 	struct spi_dev_s	*_dev;
 
-	/* this class does not allow copying */
-	SPI(const SPI &);
-	SPI operator=(const SPI &);
+	LockMode		_locking_mode{LOCK_THREADS};	/**< selected locking mode */
 
 protected:
 	int	_transfer(uint8_t *send, uint8_t *recv, unsigned len);
 
 	int	_transferhword(uint16_t *send, uint16_t *recv, unsigned len);
 
-	bool	external() { return px4_spi_bus_external(get_device_bus()); }
+	virtual bool	external() const override { return px4_spi_bus_external(get_device_bus()); }
 
 };
 

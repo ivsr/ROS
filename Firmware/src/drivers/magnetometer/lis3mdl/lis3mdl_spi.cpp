@@ -37,7 +37,7 @@
  * SPI interface for LIS3MDL
  */
 
-#include <px4_config.h>
+#include <px4_platform_common/px4_config.h>
 
 #include <assert.h>
 #include <debug.h>
@@ -68,7 +68,7 @@ class LIS3MDL_SPI : public device::SPI
 {
 public:
 	LIS3MDL_SPI(int bus, uint32_t device);
-	virtual ~LIS3MDL_SPI();
+	virtual ~LIS3MDL_SPI() = default;
 
 	virtual int     init();
 	virtual int     ioctl(unsigned operation, unsigned &arg);
@@ -89,10 +89,6 @@ LIS3MDL_SPI::LIS3MDL_SPI(int bus, uint32_t device) :
 	SPI("LIS3MDL_SPI", nullptr, bus, device, SPIDEV_MODE3, 11 * 1000 * 1000 /* will be rounded to 10.4 MHz */)
 {
 	_device_id.devid_s.devtype = DRV_MAG_DEVTYPE_LIS3MDL;
-}
-
-LIS3MDL_SPI::~LIS3MDL_SPI()
-{
 }
 
 int

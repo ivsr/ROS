@@ -41,14 +41,14 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <px4_tasks.h>
+#include <px4_platform_common/tasks.h>
 
 #pragma once
 
 class MavlinkShell
 {
 public:
-	MavlinkShell();
+	MavlinkShell() = default;
 
 	~MavlinkShell();
 

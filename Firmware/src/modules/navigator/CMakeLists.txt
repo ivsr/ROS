@@ -34,8 +34,6 @@
 px4_add_module(
 	MODULE modules__navigator
 	MAIN navigator
-	STACK_MAIN 1300
-	COMPILE_FLAGS
 	SRCS
 		navigator_main.cpp
 		navigator_mode.cpp
@@ -56,4 +54,5 @@ px4_add_module(
 	DEPENDS
 		git_ecl
 		ecl_geo
+		landing_slope
 	)

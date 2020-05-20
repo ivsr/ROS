@@ -37,26 +37,12 @@
  * SPI interface for HMC5983
  */
 
-/* XXX trim includes */
-#include <px4_config.h>
-
-#include <sys/types.h>
-#include <stdint.h>
-#include <stdbool.h>
-#include <string.h>
-#include <assert.h>
-#include <debug.h>
-#include <errno.h>
-#include <unistd.h>
-
-#include <arch/board/board.h>
-
+#include <px4_platform_common/px4_config.h>
 #include <drivers/device/spi.h>
 #include <drivers/drv_mag.h>
 #include <drivers/drv_device.h>
 
 #include "hmc5883.h"
-#include <board_config.h>
 
 #ifdef PX4_SPIDEV_HMC
 
@@ -74,7 +60,7 @@ class HMC5883_SPI : public device::SPI
 {
 public:
 	HMC5883_SPI(int bus, uint32_t device);
-	virtual ~HMC5883_SPI();
+	virtual ~HMC5883_SPI() = default;
 
 	virtual int	init();
 	virtual int	read(unsigned address, void *data, unsigned count);
@@ -94,10 +80,6 @@ HMC5883_SPI::HMC5883_SPI(int bus, uint32_t device) :
 	SPI("HMC5883_SPI", nullptr, bus, device, SPIDEV_MODE3, 11 * 1000 * 1000 /* will be rounded to 10.4 MHz */)
 {
 	_device_id.devid_s.devtype = DRV_MAG_DEVTYPE_HMC5883;
-}
-
-HMC5883_SPI::~HMC5883_SPI()
-{
 }
 
 int

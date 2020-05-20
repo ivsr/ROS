@@ -60,15 +60,11 @@ void TemperatureCalibrationGyro::reset_calibration()
 {
 	/* reset all driver level calibrations */
 	float offset = 0.0f;
-	float scale = 1.0f;
 
 	for (unsigned s = 0; s < 3; s++) {
 		set_parameter("CAL_GYRO%u_XOFF", s, &offset);
 		set_parameter("CAL_GYRO%u_YOFF", s, &offset);
 		set_parameter("CAL_GYRO%u_ZOFF", s, &offset);
-		set_parameter("CAL_GYRO%u_XSCALE", s, &scale);
-		set_parameter("CAL_GYRO%u_YSCALE", s, &scale);
-		set_parameter("CAL_GYRO%u_ZSCALE", s, &scale);
 	}
 }
 
@@ -145,7 +141,7 @@ int TemperatureCalibrationGyro::update_sensor_instance(PerSensorData &data, int 
 	}
 
 	//update linear fit matrices
-	double relative_temperature = data.sensor_sample_filt[3] - data.ref_temp;
+	double relative_temperature = (double)data.sensor_sample_filt[3] - (double)data.ref_temp;
 	data.P[0].update(relative_temperature, (double)data.sensor_sample_filt[0]);
 	data.P[1].update(relative_temperature, (double)data.sensor_sample_filt[1]);
 	data.P[2].update(relative_temperature, (double)data.sensor_sample_filt[2]);

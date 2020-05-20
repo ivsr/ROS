@@ -42,15 +42,15 @@
 #include "calibration_routines.h"
 #include "calibration_messages.h"
 
-#include <px4_defines.h>
-#include <px4_posix.h>
-#include <px4_time.h>
+#include <px4_platform_common/defines.h>
+#include <px4_platform_common/posix.h>
+#include <px4_platform_common/time.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 #include <poll.h>
-#include <cmath>
+#include <math.h>
 #include <fcntl.h>
 #include <drivers/drv_hrt.h>
 #include <drivers/drv_accel.h>
@@ -78,7 +78,7 @@ int device_prio_max = 0;
 int32_t device_id_primary = 0;
 static unsigned _last_mag_progress = 0;
 
-calibrate_return mag_calibrate_all(orb_advert_t *mavlink_log_pub);
+calibrate_return mag_calibrate_all(orb_advert_t *mavlink_log_pub, int32_t cal_mask);
 
 /// Data passed to calibration worker routine
 typedef struct  {
@@ -118,16 +118,21 @@ int do_mag_calibration(orb_advert_t *mavlink_log_pub)
 	//  sensor calibration and will be invalidated by a new sensor calibration
 	(void)sprintf(str, "EKF2_MAGBIAS_X");
 	result = param_set_no_notification(param_find(str), &mscale_null.x_offset);
+
 	if (result != PX4_OK) {
 		PX4_ERR("unable to reset %s", str);
 	}
+
 	(void)sprintf(str, "EKF2_MAGBIAS_Y");
 	result = param_set_no_notification(param_find(str), &mscale_null.y_offset);
+
 	if (result != PX4_OK) {
 		PX4_ERR("unable to reset %s", str);
 	}
+
 	(void)sprintf(str, "EKF2_MAGBIAS_Z");
 	result = param_set_no_notification(param_find(str), &mscale_null.z_offset);
+
 	if (result != PX4_OK) {
 		PX4_ERR("unable to reset %s", str);
 	}
@@ -137,6 +142,15 @@ int do_mag_calibration(orb_advert_t *mavlink_log_pub)
 	}
 
 	_last_mag_progress = 0;
+
+	// Collect: As defined by configuration
+	// start with a full mask, all six bits set
+	int32_t cal_mask = (1 << 6) - 1;
+	param_get(param_find("CAL_MAG_SIDES"), &cal_mask);
+
+	// keep and update the existing calibration when we are not doing a full 6-axis calibration
+	const bool append_to_existing_calibration = cal_mask < ((1 << 6) - 1);
+	(void)append_to_existing_calibration;
 
 	for (unsigned cur_mag = 0; cur_mag < max_mags; cur_mag++) {
 #ifdef __PX4_NUTTX
@@ -209,23 +223,15 @@ int do_mag_calibration(orb_advert_t *mavlink_log_pub)
 		device_ids[cur_mag] = px4_ioctl(fd, DEVIOCGDEVICEID, 0);
 		internal[cur_mag] = (px4_ioctl(fd, MAGIOCGEXTERNAL, 0) <= 0);
 
-		// Reset mag scale
-		result = px4_ioctl(fd, MAGIOCSSCALE, (long unsigned int)&mscale_null);
-
-		if (result != PX4_OK) {
-			calibration_log_critical(mavlink_log_pub, CAL_ERROR_RESET_CAL_MSG, cur_mag);
-		}
-
-		/* calibrate range */
-		if (result == PX4_OK) {
-			result = px4_ioctl(fd, MAGIOCCALIBRATE, fd);
+		if (!append_to_existing_calibration) {
+			// Reset mag scale & offset
+			result = px4_ioctl(fd, MAGIOCSSCALE, (long unsigned int)&mscale_null);
 
 			if (result != PX4_OK) {
-				calibration_log_info(mavlink_log_pub, "[cal] Skipped scale calibration, sensor %u", cur_mag);
-				/* this is non-fatal - mark it accordingly */
-				result = PX4_OK;
+				calibration_log_critical(mavlink_log_pub, CAL_ERROR_RESET_CAL_MSG, cur_mag);
 			}
 		}
+
 
 		px4_close(fd);
 #endif
@@ -233,7 +239,7 @@ int do_mag_calibration(orb_advert_t *mavlink_log_pub)
 
 	// Calibrate all mags at the same time
 	if (result == PX4_OK) {
-		switch (mag_calibrate_all(mavlink_log_pub)) {
+		switch (mag_calibrate_all(mavlink_log_pub, cal_mask)) {
 		case calibrate_return_cancelled:
 			// Cancel message already displayed, we're done here
 			result = PX4_ERROR;
@@ -241,23 +247,23 @@ int do_mag_calibration(orb_advert_t *mavlink_log_pub)
 
 		case calibrate_return_ok:
 			/* if there is a any preflight-check system response, let the barrage of messages through */
-			usleep(200000);
+			px4_usleep(200000);
 
 			calibration_log_info(mavlink_log_pub, CAL_QGC_PROGRESS_MSG, 100);
-			usleep(20000);
+			px4_usleep(20000);
 			calibration_log_info(mavlink_log_pub, CAL_QGC_DONE_MSG, sensor_name);
-			usleep(20000);
+			px4_usleep(20000);
 			break;
 
 		default:
 			calibration_log_critical(mavlink_log_pub, CAL_QGC_FAILED_MSG, sensor_name);
-			usleep(20000);
+			px4_usleep(20000);
 			break;
 		}
 	}
 
 	/* give this message enough time to propagate */
-	usleep(600000);
+	px4_usleep(600000);
 
 	return result;
 }
@@ -289,45 +295,49 @@ static unsigned progress_percentage(mag_worker_data_t *worker_data)
 // Returns calibrate_return_error if any parameter is not finite
 // Logs if parameters are out of range
 static calibrate_return check_calibration_result(float offset_x, float offset_y, float offset_z,
-				float sphere_radius,
-				float diag_x, float diag_y, float diag_z,
-				float offdiag_x, float offdiag_y, float offdiag_z,
-				orb_advert_t *mavlink_log_pub, size_t cur_mag)
+		float sphere_radius,
+		float diag_x, float diag_y, float diag_z,
+		float offdiag_x, float offdiag_y, float offdiag_z,
+		orb_advert_t *mavlink_log_pub, size_t cur_mag)
 {
 	float must_be_finite[] = {offset_x, offset_y, offset_z,
-							  sphere_radius,
-							  diag_x, diag_y, diag_z,
-							  offdiag_x, offdiag_y, offdiag_z};
+				  sphere_radius,
+				  diag_x, diag_y, diag_z,
+				  offdiag_x, offdiag_y, offdiag_z
+				 };
 
 	float should_be_not_huge[] = {offset_x, offset_y, offset_z};
 	float should_be_positive[] = {sphere_radius, diag_x, diag_y, diag_z};
 
 	// Make sure every parameter is finite
 	const int num_finite = sizeof(must_be_finite) / sizeof(*must_be_finite);
+
 	for (unsigned i = 0; i < num_finite; ++i) {
 		if (!PX4_ISFINITE(must_be_finite[i])) {
 			calibration_log_emergency(mavlink_log_pub,
-							"ERROR: Retry calibration (sphere NaN, #%u)", cur_mag);
+						  "ERROR: Retry calibration (sphere NaN, #%zu)", cur_mag);
 			return calibrate_return_error;
 		}
 	}
 
 	// Notify if offsets are too large
 	const int num_not_huge = sizeof(should_be_not_huge) / sizeof(*should_be_not_huge);
+
 	for (unsigned i = 0; i < num_not_huge; ++i) {
 		if (fabsf(should_be_not_huge[i]) > MAG_MAX_OFFSET_LEN) {
 			calibration_log_critical(mavlink_log_pub, "Warning: %s mag with large offsets",
-							(internal[cur_mag]) ? "autopilot, internal" : "GPS unit, external");
+						 (internal[cur_mag]) ? "autopilot, internal" : "GPS unit, external");
 			break;
 		}
 	}
 
 	// Notify if a parameter which should be positive is non-positive
 	const int num_positive = sizeof(should_be_positive) / sizeof(*should_be_positive);
+
 	for (unsigned i = 0; i < num_positive; ++i) {
 		if (should_be_positive[i] <= 0.0f) {
 			calibration_log_critical(mavlink_log_pub, "Warning: %s mag with non-positive scale",
-							(internal[cur_mag]) ? "autopilot, internal" : "GPS unit, external");
+						 (internal[cur_mag]) ? "autopilot, internal" : "GPS unit, external");
 			break;
 		}
 	}
@@ -396,7 +406,7 @@ static calibrate_return mag_calibration_worker(detect_orientation_return orienta
 		int poll_ret = px4_poll(fds, fd_count, 1000);
 
 		if (poll_ret > 0) {
-			struct gyro_report gyro;
+			sensor_gyro_s gyro{};
 			orb_copy(ORB_ID(sensor_gyro), sub_gyro, &gyro);
 
 			/* ensure we have a valid first timestamp */
@@ -488,7 +498,7 @@ static calibrate_return mag_calibration_worker(detect_orientation_return orienta
 					calibration_log_info(worker_data->mavlink_log_pub,
 							     "[cal] %s side calibration: progress <%u>",
 							     detect_orientation_str(orientation), new_progress);
-					usleep(20000);
+					px4_usleep(20000);
 
 					_last_mag_progress = new_progress;
 				}
@@ -510,14 +520,14 @@ static calibrate_return mag_calibration_worker(detect_orientation_return orienta
 				     detect_orientation_str(orientation));
 
 		worker_data->done_count++;
-		usleep(20000);
+		px4_usleep(20000);
 		calibration_log_info(worker_data->mavlink_log_pub, CAL_QGC_PROGRESS_MSG, progress_percentage(worker_data));
 	}
 
 	return result;
 }
 
-calibrate_return mag_calibrate_all(orb_advert_t *mavlink_log_pub)
+calibrate_return mag_calibrate_all(orb_advert_t *mavlink_log_pub, int32_t cal_mask)
 {
 	calibrate_return result = calibrate_return_ok;
 
@@ -525,14 +535,9 @@ calibrate_return mag_calibrate_all(orb_advert_t *mavlink_log_pub)
 
 	worker_data.mavlink_log_pub = mavlink_log_pub;
 	worker_data.done_count = 0;
-	worker_data.calibration_points_perside = calibration_total_points / calibration_sides;
-	worker_data.calibration_interval_perside_seconds = calibraton_duration_seconds / calibration_sides;
+	worker_data.calibration_points_perside = calibration_total_points / detect_orientation_side_count;
+	worker_data.calibration_interval_perside_seconds = calibraton_duration_seconds / detect_orientation_side_count;
 	worker_data.calibration_interval_perside_useconds = worker_data.calibration_interval_perside_seconds * 1000 * 1000;
-
-	// Collect: As defined by configuration
-	// start with a full mask, all six bits set
-	int32_t cal_mask = (1 << 6) - 1;
-	param_get(param_find("CAL_MAG_SIDES"), &cal_mask);
 
 	calibration_sides = 0;
 
@@ -550,7 +555,7 @@ calibrate_return mag_calibrate_all(orb_advert_t *mavlink_log_pub)
 			calibration_log_info(mavlink_log_pub,
 					     "[cal] %s side done, rotate to a different side",
 					     detect_orientation_str(static_cast<enum detect_orientation_return>(i)));
-			usleep(100000);
+			px4_usleep(100000);
 		}
 	}
 
@@ -578,9 +583,9 @@ calibrate_return mag_calibrate_all(orb_advert_t *mavlink_log_pub)
 	}
 
 	for (size_t cur_mag = 0; cur_mag < orb_mag_count && cur_mag < max_mags; cur_mag++) {
-		worker_data.x[cur_mag] = reinterpret_cast<float *>(malloc(sizeof(float) * calibration_points_maxcount));
-		worker_data.y[cur_mag] = reinterpret_cast<float *>(malloc(sizeof(float) * calibration_points_maxcount));
-		worker_data.z[cur_mag] = reinterpret_cast<float *>(malloc(sizeof(float) * calibration_points_maxcount));
+		worker_data.x[cur_mag] = static_cast<float *>(malloc(sizeof(float) * calibration_points_maxcount));
+		worker_data.y[cur_mag] = static_cast<float *>(malloc(sizeof(float) * calibration_points_maxcount));
+		worker_data.z[cur_mag] = static_cast<float *>(malloc(sizeof(float) * calibration_points_maxcount));
 
 		if (worker_data.x[cur_mag] == nullptr || worker_data.y[cur_mag] == nullptr || worker_data.z[cur_mag] == nullptr) {
 			calibration_log_critical(mavlink_log_pub, "ERROR: out of memory");
@@ -597,7 +602,8 @@ calibrate_return mag_calibrate_all(orb_advert_t *mavlink_log_pub)
 
 			// Lock in to correct ORB instance
 			bool found_cur_mag = false;
-			for(unsigned i = 0; i < orb_mag_count && !found_cur_mag; i++) {
+
+			for (unsigned i = 0; i < orb_mag_count && !found_cur_mag; i++) {
 				worker_data.sub_mag[cur_mag] = orb_subscribe_multi(ORB_ID(sensor_mag), i);
 
 				struct mag_report report;
@@ -609,9 +615,10 @@ calibrate_return mag_calibrate_all(orb_advert_t *mavlink_log_pub)
 				// and match it up with the one from the uORB subscription, because the
 				// instance ordering of uORB and the order of the FDs may not be the same.
 
-				if(report.device_id == device_ids[cur_mag]) {
+				if (report.device_id == (uint32_t)device_ids[cur_mag]) {
 					// Device IDs match, correct ORB instance for this mag
 					found_cur_mag = true;
+
 				} else {
 					orb_unsubscribe(worker_data.sub_mag[cur_mag]);
 				}
@@ -625,7 +632,7 @@ calibrate_return mag_calibrate_all(orb_advert_t *mavlink_log_pub)
 #endif
 			}
 
-			if(!found_cur_mag) {
+			if (!found_cur_mag) {
 				calibration_log_critical(mavlink_log_pub, "Mag #%u (ID %u) no matching uORB devid", cur_mag, device_ids[cur_mag]);
 				result = calibrate_return_error;
 				break;
@@ -715,19 +722,22 @@ calibrate_return mag_calibrate_all(orb_advert_t *mavlink_log_pub)
 			if (device_ids[cur_mag] != 0) {
 				// Mag in this slot is available and we should have values for it to calibrate
 
+				// Estimate only the offsets if two-sided calibration is selected, as the problem is not constrained
+				// enough to reliably estimate both scales and offsets with 2 sides only (even if the existing calibration
+				// is already close)
+				bool sphere_fit_only = calibration_sides <= 2;
 				ellipsoid_fit_least_squares(worker_data.x[cur_mag], worker_data.y[cur_mag], worker_data.z[cur_mag],
-							    worker_data.calibration_counter_total[cur_mag],
-							    100, 0.0f,
+							    worker_data.calibration_counter_total[cur_mag], 100,
 							    &sphere_x[cur_mag], &sphere_y[cur_mag], &sphere_z[cur_mag],
 							    &sphere_radius[cur_mag],
 							    &diag_x[cur_mag], &diag_y[cur_mag], &diag_z[cur_mag],
-							    &offdiag_x[cur_mag], &offdiag_y[cur_mag], &offdiag_z[cur_mag]);
+							    &offdiag_x[cur_mag], &offdiag_y[cur_mag], &offdiag_z[cur_mag], sphere_fit_only);
 
 				result = check_calibration_result(sphere_x[cur_mag], sphere_y[cur_mag], sphere_z[cur_mag],
-							    sphere_radius[cur_mag],
-							    diag_x[cur_mag], diag_y[cur_mag], diag_z[cur_mag],
-							    offdiag_x[cur_mag], offdiag_y[cur_mag], offdiag_z[cur_mag],
-							    mavlink_log_pub, cur_mag);
+								  sphere_radius[cur_mag],
+								  diag_x[cur_mag], diag_y[cur_mag], diag_z[cur_mag],
+								  offdiag_x[cur_mag], offdiag_y[cur_mag], offdiag_z[cur_mag],
+								  mavlink_log_pub, cur_mag);
 
 				if (result == calibrate_return_error) {
 					break;
@@ -792,15 +802,11 @@ calibrate_return mag_calibrate_all(orb_advert_t *mavlink_log_pub)
 
 		for (unsigned cur_mag = 0; cur_mag < max_mags; cur_mag++) {
 			if (device_ids[cur_mag] != 0) {
-				struct mag_calibration_s mscale;
-				mscale.x_scale = 1.0;
-				mscale.y_scale = 1.0;
-				mscale.z_scale = 1.0;
+				mag_calibration_s mscale;
 
 #ifdef __PX4_NUTTX
 				int fd_mag = -1;
 
-				// Set new scale
 				(void)sprintf(str, "%s%u", MAG_BASE_DEVICE_PATH, cur_mag);
 				fd_mag = px4_open(str, 0);
 
@@ -809,30 +815,40 @@ calibrate_return mag_calibrate_all(orb_advert_t *mavlink_log_pub)
 					result = calibrate_return_error;
 				}
 
-				if (result == calibrate_return_ok) {
-					if (px4_ioctl(fd_mag, MAGIOCGSCALE, (long unsigned int)&mscale) != PX4_OK) {
-						calibration_log_critical(mavlink_log_pub, "ERROR: failed to get current calibration #%u", cur_mag);
-						result = calibrate_return_error;
-					}
-				}
-
 #endif
 
 				if (result == calibrate_return_ok) {
+
+#ifdef __PX4_NUTTX
+
+					// Read existing calibration
+					if (px4_ioctl(fd_mag, MAGIOCGSCALE, (long unsigned int)&mscale) != PX4_OK) {
+						calibration_log_critical(mavlink_log_pub, CAL_ERROR_READ_CAL_MSG);
+						result = calibrate_return_error;
+					}
+
+					// Update calibration
+					// The formula for applying the calibration is:
+					//   mag_value = (mag_readout - (offset_existing + offset_new/scale_existing)) * scale_existing * scale_new
+					mscale.x_offset = mscale.x_offset + sphere_x[cur_mag] / mscale.x_scale;
+					mscale.y_offset = mscale.y_offset + sphere_y[cur_mag] / mscale.y_scale;
+					mscale.z_offset = mscale.z_offset + sphere_z[cur_mag] / mscale.z_scale;
+					mscale.x_scale = mscale.x_scale * diag_x[cur_mag];
+					mscale.y_scale = mscale.y_scale * diag_y[cur_mag];
+					mscale.z_scale = mscale.z_scale * diag_z[cur_mag];
+
+					if (px4_ioctl(fd_mag, MAGIOCSSCALE, (long unsigned int)&mscale) != PX4_OK) {
+						calibration_log_critical(mavlink_log_pub, CAL_ERROR_APPLY_CAL_MSG);
+						result = calibrate_return_error;
+					}
+
+#else
 					mscale.x_offset = sphere_x[cur_mag];
 					mscale.y_offset = sphere_y[cur_mag];
 					mscale.z_offset = sphere_z[cur_mag];
 					mscale.x_scale = diag_x[cur_mag];
 					mscale.y_scale = diag_y[cur_mag];
 					mscale.z_scale = diag_z[cur_mag];
-
-#ifdef __PX4_NUTTX
-
-					if (px4_ioctl(fd_mag, MAGIOCSSCALE, (long unsigned int)&mscale) != PX4_OK) {
-						calibration_log_critical(mavlink_log_pub, CAL_ERROR_APPLY_CAL_MSG, cur_mag);
-						result = calibrate_return_error;
-					}
-
 #endif
 				}
 
@@ -870,7 +886,7 @@ calibrate_return mag_calibrate_all(orb_advert_t *mavlink_log_pub)
 #endif
 
 					if (failed) {
-						calibration_log_critical(mavlink_log_pub, CAL_ERROR_SET_PARAMS_MSG, cur_mag);
+						calibration_log_critical(mavlink_log_pub, CAL_ERROR_SET_PARAMS_MSG);
 						result = calibrate_return_error;
 
 					} else {
@@ -880,7 +896,7 @@ calibrate_return mag_calibrate_all(orb_advert_t *mavlink_log_pub)
 						calibration_log_info(mavlink_log_pub, "[cal] mag #%u scale: x:%.2f y:%.2f z:%.2f",
 								     cur_mag, (double)mscale.x_scale, (double)mscale.y_scale, (double)mscale.z_scale);
 #endif
-						usleep(200000);
+						px4_usleep(200000);
 					}
 				}
 			}
