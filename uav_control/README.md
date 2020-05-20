@@ -4,7 +4,7 @@
 
 RUN:
 - cd /path/to/Firmware
-- make px4_sitl_default gazebo_iris
+- make posix_sitl_default gazebo_iris
 - (*another terminal*) roslaunch uav_control waypoint_control.launch
 
 CONFIG waypoint:
