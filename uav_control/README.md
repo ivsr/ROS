@@ -1,3 +1,4 @@
+BUILD:
 - copy uav_control to /path/to/catkin_ws/src
 - catkin build
 - source devel/setup.bash
